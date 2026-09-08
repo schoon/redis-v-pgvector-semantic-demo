@@ -255,19 +255,39 @@ median is harder to accidentally cherry-pick than "best of N."
   starting points, chosen to be comparable to each other — not the
   result of a recall/latency sweep on this specific 40,000-row sample.
   A real tuning exercise would look different at real data volume.
-- **Vector Sets (`VADD`/`VSIM`) are not used here, on purpose.** Redis 8
-  ships a second, newer vector-similarity primitive — a dedicated data
-  type built on HNSW internally, separate from the `FT.*` machinery
-  RedisVL/RediSearch use. Confirmed working on this repo's Redis image
-  (`VADD`/`VSIM` both execute cleanly), but it isn't wired into RedisVL's
+- **Vector Sets (`VADD`/`VSIM`) were prototyped and measured, not used
+  here, on purpose — with numbers, not just a guess.** Redis 8 ships a
+  second, newer vector-similarity primitive: a dedicated data type
+  built on HNSW internally, separate from the `FT.*` machinery
+  RedisVL/RediSearch use. It isn't wired into RedisVL's
   `SearchIndex`/`VectorQuery`/`SemanticRouter` abstractions, so using it
-  here would mean bypassing RedisVL and hand-writing raw commands for
-  one scenario only — a different stack choice than "use RedisVL,"
-  which is what this demo was built to show. It also has no hybrid
-  TAG/NUMERIC filtering, so it couldn't help the semantic-search
-  scenario at all. Given the measured HNSW gap is already small (see
-  above), it wasn't pursued — but it's a real, separate option worth
-  knowing about if a future version needs to compare it specifically.
+  would mean bypassing RedisVL and hand-writing raw commands for one
+  scenario only — a different stack choice than "use RedisVL," which is
+  what this demo was built to show.
+
+  Prototyped directly against the real 40,000-transaction sample to
+  check whether it would be worth that tradeoff: `VADD`'s **default
+  quantization (`Q8`) measurably hurt recall** — `"coffee shop
+  purchases"` returned "Groceries" transactions as the top hit, the
+  same kind of wrong-cluster miss documented in Bug 2 above for
+  RediSearch's HNSW default. Rebuilding with `NOQUANT` (full float32
+  precision) fixed correctness — the top hit's score matched RediSearch's
+  FLAT/HNSW result exactly (0.7645716...) — but at that precision, `VSIM`
+  measured **slightly slower than the existing `FT.SEARCH` HNSW path**
+  (0.62–0.66ms vs. 0.52–0.60ms across four test queries), and **building**
+  the vector set took ~17s for 40,000 elements (`VADD` is a synchronous
+  per-element call) against ~2.5s for `tx_hnsw_idx`'s background bulk-scan
+  build. It also has no hybrid TAG/NUMERIC filtering comparable to
+  RediSearch's, so it couldn't help the semantic-search scenario at all
+  even if the raw KNN numbers had come out ahead.
+
+  Conclusion: at this corpus size, with correctness held equal, Vector
+  Sets is not a "more efficient" option for this demo — it's a slower
+  build and a wash-to-slightly-slower query, for less capability, at the
+  cost of leaving RedisVL. Not pursued further. Re-check this if Redis's
+  Vector Sets implementation changes materially, or at a corpus size
+  large enough that `FT.*`'s per-call overhead (already the smallest
+  factor at 40k rows) might dominate differently.
 
 ## Numbers drift when the generator changes
 
