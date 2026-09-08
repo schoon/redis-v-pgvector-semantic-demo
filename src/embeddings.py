@@ -1,10 +1,8 @@
 """
-The one place text gets turned into vectors. Both stores (RedisVL and
-pgvector) and both seeders import this module rather than each rolling
-their own — so a given piece of text always produces the exact same
-vector regardless of which engine it ends up in. Same corpus, same
-model, same vectors: any latency or ranking difference in the demo is a
-data-access difference, never an embedding difference.
+The one place text gets turned into vectors. redis_store.py and
+seed_redis.py both import this module rather than rolling their own — so
+a given piece of text always produces the exact same vector everywhere
+it's used.
 
 sentence-transformers/all-MiniLM-L6-v2, 384 dimensions, runs locally on
 CPU — no API key, no network at query time (the model itself is

@@ -1,8 +1,9 @@
 # Methodology
 
-Read this before presenting. It covers what's fictitious, how the
-comparison stays fair, two real bugs found while building this (both
-about HNSW, both fixed), and what this demo does not support.
+Read this before presenting. It covers what's fictitious, two real HNSW
+bugs found while building this (both fixed), a real timing bug that
+made routing look far slower than it actually is, and what this demo
+does not support.
 
 ## No real customer data anywhere
 
@@ -16,26 +17,6 @@ resolution, and related customer-data maintenance and due-diligence
 work — but nothing here is drawn from or resembles a real institution's
 data, a real customer's data, or a real conversation.
 
-## Both engines answer the same question
-
-Every comparison in this repo runs the identical query text through the
-identical embedding model (`src/embeddings.py`) and passes the identical
-vector to both engines. Concretely:
-
-- **Vector search (exact/FLAT):** RedisVL's FLAT algorithm vs a Postgres
-  sequential scan (HNSW index scans disabled for that one query via
-  `SET LOCAL enable_indexscan/enable_bitmapscan = off`) — both compare
-  every candidate, no approximation, on either side.
-- **Vector search (HNSW):** an HNSW graph index on both engines, built
-  with comparable parameters (see "Two real bugs" below).
-- **Semantic search:** a vector search combined with TAG/NUMERIC filters
-  in one query on both engines, not vector search followed by a
-  separate filter step.
-- **Semantic routing:** the identical two-stage classification algorithm
-  on both engines (see below) — RedisVL's built-in `SemanticRouter` vs
-  hand-written SQL that replicates its exact math, not an approximation
-  of it.
-
 ## Scale: a laptop-sized corpus, not a claim about real data volume
 
 5,000 customers, 300,000 requests (a 40,000-row sample embedded and
@@ -45,17 +26,16 @@ a MacBook, not a statement about how large a real deployment's data is.
 
 **Only a 40,000-row sample of requests is embedded and searched.**
 Embedding all 300,000 rows works fine locally too, but a sample is
-enough to show the comparison honestly and keeps `seed_redis.py`/
-`seed_pg.py` fast to re-run. `REQUEST_EMBED_SAMPLE` in `config.py`
-controls this.
+enough to show the search behavior honestly and keeps `seed_redis.py`
+fast to re-run. `REQUEST_EMBED_SAMPLE` in `config.py` controls this.
 
-**Customer data is generated but not loaded into either engine.** None
-of the four comparison scenarios (vector search, semantic search,
-semantic routing, throughput) filters by customer — they're all "search
-within the whole corpus," not "search within what one customer can
-see." `customers.jsonl` exists so the corpus reads as a real bank's
-data shape, but there's nothing for either store to join against it for
-right now. See "What this demo does not support" below.
+**Customer data is generated but not loaded into Redis.** None of the
+scenarios (vector search, semantic search, semantic routing, caching,
+throughput) filter by customer — they're all "search within the whole
+corpus," not "search within what one customer can see." `customers.jsonl`
+exists so the corpus reads as a real bank's data shape, but there's
+nothing here that joins against it right now. See "What this demo does
+not support" below.
 
 ## Two real bugs, both about HNSW, both fixed
 
@@ -85,9 +65,7 @@ after `load_requests()` returns in `seed_redis.py`, and why it waits
 on `FT.INFO`'s `percent_indexed` reaching `1.0` before returning (the
 bulk scan is asynchronous — querying before it finishes hits a
 partially-built graph, a different way to get the same kind of degraded
-result). This mirrors pgvector's own documented advice to build an HNSW
-index after the bulk load, not before — the Postgres side of this repo
-already did that from the start.
+result).
 
 ### Bug 2: RedisVL's default `ef_runtime` (10) is too low for this corpus
 
@@ -96,24 +74,23 @@ size, trading recall for latency — defaults to 10 in RedisVL's
 `HNSWVectorFieldAttributes`. Even against a correctly bulk-built index,
 this occasionally missed a large, well-separated cluster for a query
 with no exact match. Raised to 40 in `redis_store.py`'s
-`HNSW_EF_RUNTIME`, matching `pg_store.py`'s `HNSW_EF_SEARCH = 40` — the
-same value on both engines on purpose, so the comparison is "both
-engines correctly configured," not "Redis tuned up, Postgres left at a
-default" (or the reverse).
+`HNSW_EF_RUNTIME`. Don't drop this back to the library default on the
+theory that it's unnecessary tuning — it's the difference between a
+working and a broken HNSW scenario here.
 
 **Recall numbers on the HNSW tab can still look lower than expected
 even when the result is correct.** Many requests share literally
 identical description text (and so identical embeddings) — "the same 8
 request IDs as the exact search" is ambiguous whenever more than 8
-rows tie at the 8th-smallest distance. The UI's "recall@8 vs exact"
-figure compares specific request IDs, so it can read low even when
-every returned request is the correct category at the correct
-distance. `validate.py` checks this correctly (by distance value against
-a tie-aware threshold — see `is_valid_top_k()`), which is why it passes
-cleanly even when the UI's simpler ID-overlap number doesn't look
-perfect.
+rows tie at the 8th-smallest distance. The UI's "recall@8 vs Redis's
+own exact result" figure compares specific request IDs, so it can read
+low — sometimes 0% — even when every returned request is the correct
+category at the correct distance. `validate.py` checks this correctly
+(by distance value against a tie-aware threshold — see
+`is_valid_top_k()`), which is why it passes cleanly even when the UI's
+simpler ID-overlap number doesn't look perfect.
 
-## Semantic routing: the same algorithm, not two similar ones
+## Semantic routing, and a real timing bug found while measuring it
 
 RedisVL's `SemanticRouter` classifies a sentence by:
 
@@ -126,15 +103,13 @@ RedisVL's `SemanticRouter` classifies a sentence by:
 3. Taking the lowest average, but only accepting it if that average is
    still under *that route's own* threshold.
 
-`pg_store.route_query()` replicates all three steps in SQL — a CTE that
-filters by the global max threshold before the `AVG(...)` in step 2, and
-an application-level check against the winning route's own threshold in
-step 3. An earlier version skipped step 1 (averaged over every
-reference, unconditionally) and could pick a different winner than
-RedisVL for the same sentence — a real behavioral difference, not just
-an implementation detail. Verified directly: for five varied test
-sentences, both engines return the same route with a distance matching
-to 6 decimal places.
+`validate.py`'s `independent_route()` reimplements all three steps from
+scratch in plain Python — not imported from `redis_store.py` — so
+"routing agrees with itself" is never mistaken for "routing is
+correct." An earlier version of that independent check skipped step 1
+(averaged over every reference, unconditionally), which is a materially
+more lenient calculation that can pick a different winner than
+`SemanticRouter` actually would for the same sentence.
 
 ### Routing to the right vector search, not just naming an intent
 
@@ -142,69 +117,32 @@ Classifying a question into an intent is only useful if something acts
 on it. Each route in `routes.py` carries a `search_target`
 (`"procedures"`, `"sop"`, or `None`) naming which corpus, if any,
 answers that intent directly. Once `route_query()` determines the
-winning route on either engine, it reuses the *same query embedding* —
-no second `embed()` call — to immediately search that corpus and
-returns the top hits alongside the routing decision. `procedure_lookup`
-routes to `procedures`; most process-question intents (address update,
-duplicate TIN resolution, beneficial ownership, due diligence, and the
-rest) route to `sop_articles`; `case_status_inquiry` and
-`escalation_request` route to `None`, because answering those needs a
-live case-system lookup no static corpus in this demo can provide —
-routing correctly recognizing "this needs live data, not a search" is
-itself part of what routing is for.
+winning route, it reuses the *same query embedding* — no second
+`embed()` call — to immediately search that corpus and returns the top
+hits alongside the routing decision. `procedure_lookup` routes to
+`procedures`; most process-question intents (address update, duplicate
+TIN resolution, beneficial ownership, due diligence, and the rest)
+route to `sop_articles`; `case_status_inquiry` and `escalation_request`
+route to `None`, because answering those needs a live case-system
+lookup no static corpus in this demo can provide — routing correctly
+recognizing "this needs live data, not a search" is itself part of
+what routing is for.
 
-Verified directly, not just assumed: for `"what's the process for a
-duplicate TIN case"`, both engines route to `procedure_lookup` and both
-return the identical top-3 procedures in the same order (re-verified
-against this repo's own data after each corpus change — see the
-Validating the results section in the README rather than trusting a
-one-time snapshot here). Same pattern as the routing algorithm itself —
-one behavior, two implementations, checked against each other rather
-than trusted separately.
+Verified against ground truth, not just assumed: for `"what's the
+process for a duplicate TIN case"`, routing lands on `procedure_lookup`
+and the top procedure returned is checked against an independently
+computed brute-force nearest match in `validate.py`'s "route-to-search"
+check — not just "some result came back."
 
-### Postgres wins routing at every scale tested, not just at this demo's scale
-
-It would be convenient if "Postgres wins routing" were purely a
-demo-scale artifact (87 reference utterances) that reverses once a real
-deployment has thousands of routes — the same story that explains most
-of the semantic-search gap. It isn't. Tested directly: an isolated
-scaling rig (not the live demo — a temporary index/table, cleaned up
-after) replicated reference embeddings up to 1,000× the real corpus and
-ran RedisVL's exact `SemanticRouter` pipeline (`RangeQuery` →
-`FT.AGGREGATE GROUPBY` → `REDUCE avg()`) against Postgres's equivalent
-`GROUP BY`:
-
-| References | Redis (`FT.AGGREGATE`) | Postgres (`GROUP BY`) | Ratio |
-| ---------- | ---------------------- | ---------------------- | ----- |
-| 87 (real corpus) | 1.47 ms | 0.28 ms | 5.2× |
-| 870 | 1.47 ms | 0.45 ms | 3.3× |
-| 8,700 | 6.67 ms | 2.29 ms | 2.9× |
-| 87,000 | 81.0 ms | 21.9 ms | 3.7× |
-
-The ratio narrows through the middle, then **widens again** at the
-largest scale tested — it never converges, and there's no sign of a
-crossover at any scale checked. This is architectural, not a demo-scale
-illusion: `SemanticRouter` runs a general-purpose multi-stage
-aggregation pipeline (built to support arbitrary `GROUPBY`/`REDUCE`
-combinations), which carries more per-row overhead than a query engine
-running one specialized `GROUP BY` for exactly this shape of question.
-Making Redis win this specific scenario would require either a leaner
-routing primitive from RedisVL, or hand-rolling a different Redis-side
-algorithm that no longer matches `SemanticRouter`'s real behavior —
-i.e., exactly the "similar, not identical" shortcut this file
-repeatedly rejects elsewhere. Left honest rather than chased.
-
-### A third bug, found here rather than in the HNSW section: `route_query()` was charging Redis for embedding time Postgres wasn't
+### A real bug: `route_query()` was charging itself for embedding time it shouldn't have
 
 An earlier version of `redis_store.route_query()` called RedisVL's
-`router(statement=query_text)`, timing the whole call. `SemanticRouter.__call__`
-embeds internally when given a `statement` instead of a `vector`
-(`vector = self.vectorizer.embed(statement)`) — so that timer included a
-local, single-threaded embedding step, ~6ms on this laptop.
-`pg_store.route_query()` was never structured that way — it always
-embedded before starting its own timer. Same demo, same "median of N
-timed calls" methodology, two different things being measured: Redis's
-number was "embed + route," Postgres's was "route" alone.
+`router(statement=query_text)`, timing the whole call.
+`SemanticRouter.__call__` embeds internally when given a `statement`
+instead of a `vector` (`vector = self.vectorizer.embed(statement)`) —
+so that timer included a local, single-threaded embedding step, ~6ms
+on this laptop, bolted onto what was supposed to be a measurement of
+the Redis round trip alone.
 
 Profiled directly to confirm before fixing (not just theorized):
 
@@ -214,62 +152,49 @@ router(statement=query) — full:   8.35 ms   (includes the embed above)
 router(vector=precomputed) — only the Redis round trip:   0.69 ms
 ```
 
-The actual Redis round trip was faster than Postgres's the whole time —
-the ~6ms of embedding time bolted onto only Redis's measurement was
-doing all the work of making it look like a 5× Postgres win. Fixed by
-embedding before starting the timer and calling `router(vector=vec)`,
-matching `pg_store.py`'s existing pattern exactly. After the fix, the
-two engines are roughly even at this corpus's scale (87 reference
-utterances) — see the README for current numbers. This is exactly the
-"both engines answer the same question" discipline from CLAUDE.md
-failing silently: nothing about the wrong numbers looked obviously
-wrong until profiled component-by-component instead of trusting the
-end-to-end timer. If you touch `route_query()` on either side again,
-profile embed-only vs. round-trip-only again before trusting the
-combined number.
+The real Redis round trip (~0.7ms) had nothing to do with the ~8ms
+number the UI would have shown — nearly all of it was local CPU-bound
+embedding time that has nothing to do with Redis's own performance.
+Fixed by embedding before starting the timer and calling
+`router(vector=vec)`. If you touch `route_query()` again, profile
+embed-only vs. round-trip-only again before trusting the combined
+number — this bug produced numbers that looked plausible, not
+obviously broken.
 
-## Semantic caching: no pgvector equivalent, on purpose
+## Semantic caching: a capability, not just a faster query
 
 RedisVL's `SemanticCache` extension checks whether a semantically
 similar question was already answered (`distance_threshold = 0.15`
 here — looser than the library default of 0.1, loose enough to catch an
 obvious paraphrase, tight enough not to conflate genuinely different
-questions) before running any real search. pgvector has no comparable
-primitive. `pg_store.py`'s side of this scenario isn't a hand-rolled
-cache — it's just the plain exact search (`vector_search_flat()`),
-called fresh every single time, because that's the honest Postgres
-answer to "how do you avoid repeating this work": you don't, unless you
-build a caching layer yourself in application code.
+questions) before running any real search. That's the point of this
+tab: a plain vector index doesn't give you "has anyone basically asked
+this before" for free — `SemanticCache` is a distinct, purpose-built
+primitive layered on top.
 
 **Why this scenario caches request search, not procedure search.**
 An earlier version cached the 15-row procedure search. The problem:
-that search is already sub-millisecond on both engines, so the *most*
-a cache hit could save was well under a millisecond — real, but not a
-result anyone would notice in a demo. Caching the request search
-instead makes the miss cost (the thing being avoided) the same ~15-18ms
-Postgres FLAT scan already shown in the exact-search scenario, so the
-win is visible and it's the same underlying fact already established
-elsewhere in this repo, not a new, cherrier-picked one.
+that search is already sub-millisecond, so the *most* a cache hit
+could save was well under a millisecond — real, but not a result
+anyone would notice in a demo. Caching the request search instead makes
+the miss cost (the thing being avoided) the full exact-search cost
+already shown in the Vector search tab, so the win is visible.
 
 **Embedding happens before the timer starts here too**, same convention
 as everywhere else in this codebase (see the routing timing bug above)
 — a cache hit and a cache miss both still have to embed the incoming
 question to know whether anything matches, so excluding that shared
 cost isolates the same thing it isolates in every other scenario: the
-datastore-side cost, not a client-side cost neither engine's caching
-behavior can do anything about.
+datastore-side cost, not a client-side cost the cache can't do
+anything about.
 
 **The demo's "simulate N repeat questions" control clears the cache
 first**, so call 1 is a genuine miss every time it's run, not a hit
 left over from an earlier demo run or another visitor's request.
 
-**This is architectural, not a tuning result** — see the README for why
-a larger, more expensive cached operation would widen this gap, not
-narrow it.
-
 ## How timing works
 
-Every comparison endpoint in `server.py` runs each engine `runs` times
+Every search endpoint in `server.py` runs the query `runs` times
 (default 3, adjustable in the UI) and reports the **median**, not the
 mean — one slow first-call outlier shouldn't move the number, and a
 median is harder to accidentally cherry-pick than "best of N."
@@ -286,11 +211,10 @@ median is harder to accidentally cherry-pick than "best of N."
   routing, average vector distance) only — no cross-encoder or LLM
   re-ranking step on top.
 - **HNSW parameters are reasonable defaults, not tuned for this exact
-  corpus.** `m=16, ef_construction=200, ef_runtime=40` (Redis) and
-  `m=16, ef_construction=64, ef_search=40` (Postgres) are sensible
-  starting points, chosen to be comparable to each other — not the
-  result of a recall/latency sweep on this specific 40,000-row sample.
-  A real tuning exercise would look different at real data volume.
+  corpus.** `m=16, ef_construction=200, ef_runtime=40` are sensible
+  starting points, not the result of a recall/latency sweep on this
+  specific 40,000-row sample. A real tuning exercise would look
+  different at real data volume.
 - **Vector Sets (`VADD`/`VSIM`) were prototyped and measured, not used
   here, on purpose — with numbers, not just a guess.** Redis 8 ships a
   second, newer vector-similarity primitive: a dedicated data type
@@ -330,7 +254,6 @@ median is harder to accidentally cherry-pick than "best of N."
 `src/generate.py` runs off a fixed seed (`SEED` in `config.py`), so the
 corpus is reproducible run to run — but changing `REQUEST_TYPES`,
 `PROCEDURE_CATALOG`, `SOP_CATALOG`, or the scale constants will change
-the generated data, which will change measured latencies and possibly
-which engine wins a given scenario. Re-run `validate.py` and `bench.py`
-after any such change, and update the README's numbers rather than
-leaving stale ones in place.
+the generated data, which will change measured latencies. Re-run
+`validate.py` and `bench.py` after any such change, and update the
+README's numbers rather than leaving stale ones in place.

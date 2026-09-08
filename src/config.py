@@ -5,10 +5,6 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6384")
 
-PG_DSN = os.environ.get(
-    "PG_DSN", "postgresql://demo:demopassword@localhost:5433/semanticdemo"
-)
-
 PORT = int(os.environ.get("PORT", "8040"))
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"

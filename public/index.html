@@ -2,17 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Redis vs pgvector — Semantic Search &amp; Routing</title>
+<title>Redis Search for Identity Operations</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {
     --bg: #0d0f13; --panel: #151821; --panel-2: #1b1f2a; --line: #262b38;
-    --text: #e7e9ee; --muted: #8b93a3; --good: #35c46b; --bad: #e5484d;
-    --redis: #dc382c; --postgres: #336791;
+    --text: #e7e9ee; --muted: #8b93a3; --good: #35c46b;
+    --redis: #dc382c;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-  .wrap { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.5rem 4rem; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 1.5rem 1.5rem 4rem; }
   a { color: #7db8ff; }
   header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.5rem; }
   header h1 { font-size: 1.15rem; margin: 0; font-weight: 650; }
@@ -36,7 +36,7 @@
   html.demo .landing { display: none; }
   html:not(.demo) .demo-app { display: none; }
 
-  /* Architecture diagram overlays */
+  /* Diagram overlays */
   .overlay { position: fixed; inset: 0; background: rgba(6, 7, 10, 0.82); display: flex; align-items: center; justify-content: center; padding: 2rem 1rem; z-index: 50; }
   .overlay[hidden] { display: none; }
   .overlay-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; max-width: 640px; width: 100%; max-height: 88vh; overflow-y: auto; padding: 1.6rem 1.8rem; }
@@ -61,6 +61,13 @@
   .scenarios button.active { background: var(--panel-2); color: var(--text); border-color: #3d4450; }
   .hint { color: var(--muted); font-size: 0.8rem; margin: 0 0 0.9rem; min-height: 1.2rem; }
 
+  /* Persistent "how Redis powers this" explainer, one per tab */
+  .explain { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--redis); border-radius: 10px; padding: 0.9rem 1.1rem; margin-bottom: 1.1rem; }
+  .explain h3 { margin: 0 0 0.4rem; font-size: 0.9rem; }
+  .explain p { margin: 0 0 0.7rem; font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+  .explain .diagram-code { font-size: 0.7rem; margin-bottom: 0.4rem; }
+  .explain .diagram-link { background: none; border: none; color: #7db8ff; font-size: 0.75rem; padding: 0; cursor: pointer; font-family: inherit; text-decoration: underline; }
+
   .controls { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
   input[type="text"], input[type="number"], select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 0.6rem 0.75rem; font-size: 0.95rem; font-family: inherit; }
   input[type="text"] { flex: 1; min-width: 14rem; }
@@ -70,35 +77,18 @@
   .filters { display: none; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.6rem; align-items: center; }
   .filters.show { display: flex; }
 
-  .summary { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: center; margin: 1.4rem 0 0.5rem; }
+  .summary { display: flex; justify-content: center; margin: 1.4rem 0 0.5rem; }
   .summary[hidden] { display: none; }
-  .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem 1rem; }
+  .metric { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--redis); border-radius: 10px; padding: 0.9rem 1.4rem; min-width: 16rem; text-align: center; }
   .metric .engine { font-size: 0.7rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
   .metric .time { font-size: 1.9rem; font-weight: 680; font-variant-numeric: tabular-nums; line-height: 1.15; }
   .metric .sub { font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .metric.redis { border-left: 3px solid var(--redis); }
-  .metric.postgres { border-left: 3px solid var(--postgres); }
-  .verdict { text-align: center; }
-  .verdict .x { font-size: 1.6rem; font-weight: 700; color: var(--good); font-variant-numeric: tabular-nums; }
-  .verdict .lbl { font-size: 0.66rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
-  .verdict.warn .x { color: #d8a02a; font-size: 0.95rem; }
 
-  .bars { margin: 0.25rem 0 1.25rem; }
-  .bar-row { display: grid; grid-template-columns: 4.5rem 1fr 5.5rem; gap: 0.6rem; align-items: center; margin: 0.3rem 0; }
-  .bar-row .name { font-size: 0.75rem; color: var(--muted); }
-  .bar-track { background: var(--panel); border-radius: 4px; height: 0.85rem; overflow: hidden; }
-  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.18s ease; }
-  .bar-fill.redis { background: var(--redis); }
-  .bar-fill.postgres { background: var(--postgres); }
-  .bar-row .val { font-size: 0.78rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
-
-  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .panes { display: block; }
   .panes[hidden] { display: none; }
-  @media (max-width: 860px) { .panes { grid-template-columns: 1fr; } .summary { grid-template-columns: 1fr; } .landing .feature-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 860px) { .landing .feature-grid { grid-template-columns: 1fr; } }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-  .pane h2 { margin: 0; padding: 0.7rem 0.9rem; font-size: 0.85rem; font-weight: 600; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
-  .pane.redis h2 { color: var(--redis); }
-  .pane.postgres h2 { color: var(--postgres); }
+  .pane h2 { margin: 0; padding: 0.7rem 0.9rem; font-size: 0.85rem; font-weight: 600; color: var(--redis); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
   .pane h2 .count { color: var(--muted); font-size: 0.75rem; font-weight: 400; font-variant-numeric: tabular-nums; }
   .q { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.66rem; color: var(--muted); padding: 0.55rem 0.9rem; border-bottom: 1px solid var(--line); word-break: break-all; background: #0f1116; min-height: 3rem; max-height: 6rem; overflow-y: auto; white-space: pre-wrap; }
   .empty { padding: 1.2rem 0.9rem; color: var(--muted); font-style: italic; text-align: center; font-size: 0.85rem; }
@@ -106,7 +96,7 @@
   th { text-align: left; padding: 0.4rem 0.9rem; color: var(--muted); font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
   td { padding: 0.4rem 0.9rem; border-top: 1px solid var(--line); }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .rowbody { max-height: 360px; overflow-y: auto; }
+  .rowbody { max-height: 420px; overflow-y: auto; }
 
   .route-card { padding: 1rem; }
   .route-card .name { font-size: 1.05rem; font-weight: 700; }
@@ -123,35 +113,37 @@
   body.loading .progress { background: var(--line); }
   body.loading .progress::after { content: ''; display: block; height: 100%; width: 35%; background: var(--redis); animation: slide 0.9s ease-in-out infinite; }
   @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
-  body.loading .summary, body.loading .bars { opacity: 0.4; }
-  .summary, .bars { transition: opacity 0.12s ease; }
+  body.loading .summary { opacity: 0.4; }
+  .summary { transition: opacity 0.12s ease; }
 </style>
 </head>
 <body>
 <div class="wrap">
 
   <div class="landing">
-    <span class="tag-pill">redis vs pgvector</span>
-    <h1>Semantic Search &amp; Routing</h1>
+    <span class="tag-pill">redis + redisvl</span>
+    <h1>Search, Powered by Redis</h1>
     <p>
-      Side-by-side vector search, hybrid semantic search, and semantic
-      intent routing — <b>Redis (RedisVL)</b> vs <b>Postgres (pgvector)</b> —
-      over a fictitious bank's customer identity operations: the requests
-      that keep customer identity records accurate and compliant, the
-      procedures case workers follow, and a knowledge base of SOP
-      articles. Same corpus, same embeddings, same questions.
+      Vector search, hybrid semantic search, semantic caching, and
+      semantic intent routing — all built on <b>Redis</b> and
+      <b>RedisVL</b> — over a fictitious bank's customer identity
+      operations: the requests that keep customer identity records
+      accurate and compliant, the procedures case workers follow, and a
+      knowledge base of SOP articles. Each tab below shows one search
+      capability and exactly which Redis command or RedisVL feature is
+      producing it.
     </p>
     <div class="feature-grid">
       <div class="card"><h3>Vector search</h3><p>Exact (FLAT/KNN) and approximate (HNSW) nearest-neighbor search over 40,000 embedded identity-ops requests.</p></div>
       <div class="card"><h3>Semantic search</h3><p>Natural-language search over the procedure catalog and SOP articles, combined with category/SLA filters in one query.</p></div>
       <div class="card">
         <h3>Semantic caching</h3>
-        <p>RedisVL's SemanticCache vs Postgres, which has no caching layer and recomputes every single call.</p>
+        <p>RedisVL's SemanticCache recognizes a repeated or paraphrased question and skips the underlying search entirely.</p>
         <button class="diagram-link" id="showCacheDiagram">See how it works with RedisVL →</button>
       </div>
       <div class="card">
         <h3>Semantic routing</h3>
-        <p>RedisVL's built-in SemanticRouter vs a hand-rolled pgvector equivalent — routes straight into the matching search.</p>
+        <p>RedisVL's built-in SemanticRouter classifies intent, then routes straight into the matching search.</p>
         <button class="diagram-link" id="showRouteDiagram">See how it works with RedisVL →</button>
       </div>
     </div>
@@ -191,7 +183,7 @@ def answer(query_text):
     response = run_real_search(vec)       # cache miss — compute it once
     cache.store(prompt=query_text, response=response, vector=vec)
     return response</pre>
-      <p class="callout">That's the whole implementation — no reference cosine-distance math, no manual index management. Postgres has no equivalent primitive to call here, which is the point: this is a capability, not just a faster query.</p>
+      <p class="callout">That's the whole implementation — no reference cosine-distance math, no manual index management, just a Redis-backed vector index purpose-built for "has something like this been asked before."</p>
     </div>
   </div>
 
@@ -230,13 +222,13 @@ def route_and_answer(query_text):
     elif match.name == "address_update":
         return search_sop(vector=vec)
     # ...</pre>
-      <p class="callout">Postgres's equivalent (see the demo) is a hand-written SQL CTE that replicates this same two-stage filter by hand — it works, but every route-matching rule lives in application SQL instead of a three-line extension call.</p>
+      <p class="callout">Every route-matching rule lives in this one declarative list — no keyword rules, no if/elif chains guessing at intent from substrings.</p>
     </div>
   </div>
 
   <div class="demo-app">
     <header>
-      <h1>Redis vs pgvector — Semantic Search &amp; Routing</h1>
+      <h1>Redis Search for Identity Operations</h1>
       <button class="ghost" id="backToOverview">← Overview</button>
     </header>
 
@@ -250,6 +242,7 @@ def route_and_answer(query_text):
       <button data-s="architecture">Architecture</button>
     </div>
     <div class="hint" id="hint"></div>
+    <div class="explain" id="explain"></div>
 
     <div class="controls" id="controls">
       <input type="text" id="q" placeholder="Query...">
@@ -275,34 +268,18 @@ def route_and_answer(query_text):
     <div class="progress" id="progress"></div>
 
     <div class="summary" id="summary" hidden>
-      <div class="metric redis">
+      <div class="metric">
         <div class="engine">Redis</div>
         <div class="time" id="rt">—</div>
         <div class="sub" id="rsub">&nbsp;</div>
       </div>
-      <div class="verdict" id="verdict">
-        <div class="x" id="vx">—</div>
-        <div class="lbl" id="vlbl">faster</div>
-      </div>
-      <div class="metric postgres">
-        <div class="engine">Postgres</div>
-        <div class="time" id="ot">—</div>
-        <div class="sub" id="osub">&nbsp;</div>
-      </div>
     </div>
 
-    <div class="bars" id="bars"></div>
-
     <div class="panes" id="panes">
-      <div class="pane redis">
-        <h2>Redis <span class="count" id="rcount"></span></h2>
+      <div class="pane">
+        <h2>Result <span class="count" id="rcount"></span></h2>
         <div class="q" id="rq"></div>
         <div class="rowbody" id="rbody"></div>
-      </div>
-      <div class="pane postgres">
-        <h2>Postgres <span class="count" id="ocount"></span></h2>
-        <div class="q" id="oq"></div>
-        <div class="rowbody" id="obody"></div>
       </div>
     </div>
 
@@ -337,13 +314,69 @@ def route_and_answer(query_text):
   });
 
   const SCENARIOS = {
-    flat: { hint: 'Exact (FLAT/KNN) nearest-neighbor search over 40,000 embedded identity-ops request descriptions — every candidate compared, no approximation.' },
-    hnsw: { hint: 'Approximate (HNSW) nearest-neighbor search — same requests, same query, a graph index instead of brute force.' },
-    semantic: { hint: 'Semantic search with metadata filters, in one query — not vector search followed by a separate filter step.', filters: true },
-    cache: { hint: 'Repeat/popular traffic for the same question — RedisVL\'s SemanticCache vs Postgres, which has no caching layer and recomputes every single call.', cacheFilters: true, noRuns: true },
-    route: { hint: 'Route a customer question to the right intent, then straight into the right vector search — RedisVL\'s built-in SemanticRouter vs a hand-rolled pgvector equivalent.', noRuns: true },
-    throughput: { hint: 'Concurrent entitlement-style vector search QPS, run npm run bench equivalent (see README).', noControls: true },
-    architecture: { hint: 'Live schema introspection for both engines.', noControls: true },
+    flat: {
+      hint: 'Exact (FLAT/KNN) nearest-neighbor search over 40,000 embedded identity-ops request descriptions — every candidate compared, no approximation.',
+      explain: {
+        title: 'Exact nearest-neighbor search — FT.SEARCH … FLAT',
+        body: 'Every one of the 40,000 sampled requests is embedded once at load time and stored in a FLAT vector index. A FLAT query compares the incoming question against every candidate directly — brute-force, no approximation — so the result is always the true nearest match. The right default for a caseload this size, where correctness matters more than shaving fractions of a millisecond.',
+        code: 'FT.SEARCH req_flat_idx "*=>[KNN 8 @embedding $vec]"\n  PARAMS 2 vec <384-float blob> DIALECT 2',
+      },
+    },
+    hnsw: {
+      hint: 'Approximate (HNSW) nearest-neighbor search — same requests, same query, a graph index instead of brute force.',
+      explain: {
+        title: 'Approximate nearest-neighbor search — FT.SEARCH … HNSW',
+        body: 'The same requests are indexed a second time behind an HNSW graph — built once over the whole corpus, letting a query "walk" toward its nearest neighbors instead of comparing every candidate. Trades a small amount of recall for search that keeps scaling well past what FLAT can comfortably handle as a caseload grows into the millions. ef_runtime (tuned to 40 here) controls how wide that walk searches at query time.',
+        code: 'FT.SEARCH req_hnsw_idx "*=>[KNN 8 @embedding $vec]"\n  PARAMS 2 vec <384-float blob> DIALECT 2',
+      },
+    },
+    semantic: {
+      hint: 'Semantic search with metadata filters, in one query — not vector search followed by a separate filter step.',
+      filters: true,
+      explain: {
+        title: 'Hybrid search — vector + TAG/NUMERIC filters, one query',
+        body: 'A case worker\'s question is embedded and matched against the procedure catalog or SOP knowledge base, filtered by category or SLA in the exact same query. RediSearch combines the vector KNN clause with TAG/NUMERIC filters natively — no separate "search, then filter in application code" step, and no risk of a better match getting cut off before the filter runs.',
+        code: 'FT.SEARCH procedure_idx "(@category:{Address Maintenance} @sla_days:[-inf 5])=>[KNN 8 @embedding $vec]"\n  PARAMS 2 vec <blob> DIALECT 2',
+      },
+    },
+    cache: {
+      hint: 'Repeat/popular traffic for the same question — RedisVL\'s SemanticCache skips the underlying search entirely on a hit.',
+      cacheFilters: true, noRuns: true,
+      explain: {
+        title: 'Semantic caching — RedisVL SemanticCache',
+        body: 'Before running any real search, RedisVL checks whether a semantically similar question has already been answered. A hit returns the cached response from one indexed lookup — the underlying search never runs again. This is a genuine capability, not just a faster query: a plain vector index doesn\'t give you "has anyone basically asked this before" for free.',
+        code: 'cache.check(vector=vec)   # hit → return cached response\ncache.store(prompt=q, response=r, vector=vec)   # miss → cache it',
+        diagramId: 'cacheDiagramOverlay',
+      },
+    },
+    route: {
+      hint: 'Route a customer question to the right intent, then straight into the right vector search — RedisVL\'s built-in SemanticRouter.',
+      noRuns: true,
+      explain: {
+        title: 'Semantic intent routing — RedisVL SemanticRouter',
+        body: 'Every incoming question is classified into one of 12 identity-ops intents — address update, duplicate TIN resolution, escalation, and so on — by comparing it to a handful of example phrasings per intent, entirely inside Redis. When an intent maps to a searchable corpus, the SAME embedding is immediately reused to search it. No keyword rules, no second embedding call, no manual "which index" branching in application code.',
+        code: 'match = router(vector=vec)   # classify\nif match.name == "procedure_lookup":\n    search_procedures(vector=vec)   # same vector, reused',
+        diagramId: 'routeDiagramOverlay',
+      },
+    },
+    throughput: {
+      hint: 'Concurrent vector-search QPS under worker-based load — how much one Redis instance can carry.',
+      noControls: true,
+      explain: {
+        title: 'Concurrent load — how much can one Redis instance carry',
+        body: 'Worker threads hit FT.SEARCH concurrently against req_flat_idx for a sustained window, and every single request\'s latency is recorded — not just the mean. The same exact-search scenario as the Vector search tab, run under load instead of one query at a time, to show what real caseload query volume looks like against a single Redis instance.',
+        code: 'python src/bench.py --concurrency=16 --duration=8',
+      },
+    },
+    architecture: {
+      hint: 'Live schema introspection.',
+      noControls: true,
+      explain: {
+        title: 'Live schema introspection — FT.INFO / DBSIZE',
+        body: 'Every index, the semantic router, and the semantic cache backing this app, introspected live rather than described from memory — so what\'s shown here is guaranteed to match what\'s actually running.',
+        code: 'FT.INFO req_flat_idx\nDBSIZE',
+      },
+    },
   };
 
   const EXAMPLES = {
@@ -353,11 +386,28 @@ def route_and_answer(query_text):
     cache: ['address change requests', 'duplicate TIN cases', 'beneficial ownership updates', 'due diligence refresh', 'deceased customer processing'],
   };
 
+  function renderExplain(cfg) {
+    const box = el('explain');
+    if (!cfg) { box.replaceChildren(); return; }
+    const h3 = document.createElement('h3'); h3.textContent = cfg.title;
+    const p = document.createElement('p'); p.textContent = cfg.body;
+    const pre = document.createElement('pre'); pre.className = 'diagram-code'; pre.textContent = cfg.code;
+    box.replaceChildren(h3, p, pre);
+    if (cfg.diagramId) {
+      const link = document.createElement('button');
+      link.className = 'diagram-link';
+      link.textContent = 'See the full interactive flow →';
+      link.addEventListener('click', () => { el(cfg.diagramId).hidden = false; });
+      box.append(link);
+    }
+  }
+
   function setScenario(next) {
     scenario = next;
     for (const b of el('scenarios').children) b.classList.toggle('active', b.dataset.s === next);
     const cfg = SCENARIOS[next];
     el('hint').textContent = cfg.hint;
+    renderExplain(cfg.explain);
     el('controls').style.display = cfg.noControls ? 'none' : '';
     el('runs').closest('label').style.display = cfg.noRuns ? 'none' : '';
     el('semanticFilters').classList.toggle('show', Boolean(cfg.filters));
@@ -399,8 +449,8 @@ def route_and_answer(query_text):
   // repopulated when the corpus dropdown changes. Leaving procedure
   // categories showing while "SOP articles" is selected lets you pick a
   // category that matches zero SOP articles, which silently returns an
-  // empty result on both engines — not a search bug, but from the UI it
-  // looks exactly like one.
+  // empty result — not a search bug, but from the UI it looks exactly
+  // like one.
   const PROCEDURE_CATEGORIES = ['Address Maintenance', 'TIN/SSN Resolution', 'Beneficial Ownership', 'Due Diligence', 'Identity Verification', 'Estate Processing', 'Documentation', 'Escalations'];
   const SOP_CATEGORIES = ['Address Changes', 'TIN/SSN Issues', 'Beneficial Ownership', 'Due Diligence', 'Identity Verification', 'Estate Processing', 'Documentation', 'Escalations', 'Case Management'];
 
@@ -412,32 +462,6 @@ def route_and_answer(query_text):
 
   async function loadDropdowns() {
     populateCategoryOptions();
-  }
-
-  function setVerdict(redisVal, postgresVal, { lowerIsBetter = true, matchOk = true, mismatchLabel = '' } = {}) {
-    el('verdict').classList.toggle('warn', !matchOk);
-    if (!matchOk) { el('vx').textContent = mismatchLabel; el('vlbl').textContent = ''; return; }
-    const redisWins = lowerIsBetter ? redisVal <= postgresVal : redisVal >= postgresVal;
-    const ratio = redisWins
-      ? (lowerIsBetter ? postgresVal / redisVal : redisVal / postgresVal)
-      : (lowerIsBetter ? redisVal / postgresVal : postgresVal / redisVal);
-    el('vx').textContent = `${ratio.toFixed(ratio >= 10 ? 0 : 1)}×`;
-    el('vlbl').textContent = `${redisWins ? 'redis' : 'postgres'} faster`;
-  }
-
-  function renderBars(redisMs, postgresMs) {
-    const max = Math.max(redisMs, postgresMs, 0.001);
-    el('bars').replaceChildren(...[['Redis', redisMs, 'redis'], ['Postgres', postgresMs, 'postgres']].map(([name, ms, cls]) => {
-      const row = document.createElement('div'); row.className = 'bar-row';
-      const n = document.createElement('div'); n.className = 'name'; n.textContent = name;
-      const track = document.createElement('div'); track.className = 'bar-track';
-      const fill = document.createElement('div'); fill.className = `bar-fill ${cls}`;
-      fill.style.width = `${Math.max((ms / max) * 100, 0.6)}%`;
-      track.append(fill);
-      const v = document.createElement('div'); v.className = 'val'; v.textContent = `${ms.toFixed(3)} ms`;
-      row.append(n, track, v);
-      return row;
-    }));
   }
 
   function rowsToTable(rows, cols) {
@@ -492,19 +516,15 @@ def route_and_answer(query_text):
     const d = await (await fetch(`/api/vector-search?${params}`)).json();
     if (stale()) return;
     el('q').value = query;
-    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.ms.toFixed(3)} ms`;
-    const recallTxt = (r) => r.recall_vs_exact == null ? '' : ` · recall@8 vs exact: ${(r.recall_vs_exact * 100).toFixed(0)}%`;
-    el('rsub').textContent = `median of ${d.runs} · ${d.redis.rows.length} results${recallTxt(d.redis)}`;
-    el('osub').textContent = `median of ${d.runs} · ${d.postgres.rows.length} results${recallTxt(d.postgres)}`;
-    setVerdict(d.redis.ms, d.postgres.ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
-    el('rcount').textContent = ''; el('ocount').textContent = '';
-    el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
+    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`;
+    const recallTxt = d.redis.recall_vs_exact == null ? '' : ` · recall@8 vs Redis's own exact result: ${(d.redis.recall_vs_exact * 100).toFixed(0)}%`;
+    el('rsub').textContent = `median of ${d.runs} · ${d.redis.rows.length} results${recallTxt}`;
+    el('rcount').textContent = '';
+    el('rq').textContent = d.redis.query;
     el('rbody').replaceChildren(rowsToTable(d.redis.rows, REQ_COLS));
-    el('obody').replaceChildren(rowsToTable(d.postgres.rows, REQ_COLS));
-    renderBars(d.redis.ms, d.postgres.ms);
     el('method').innerHTML = algorithm === 'hnsw'
-      ? 'Approximate nearest-neighbor search via an HNSW graph index on both engines. "recall@8 vs exact" compares this result\'s IDs against that <b>same engine\'s</b> exact (FLAT) result for the identical query — low overlap with an otherwise-correct category usually means many requests tied at the same distance, not a wrong answer (see Methodology).'
-      : 'Exact nearest-neighbor search: RedisVL\'s FLAT algorithm vs a sequential scan in Postgres (HNSW index scans disabled for this one query) — every candidate compared, no approximation, on both sides.';
+      ? 'Approximate nearest-neighbor search via an HNSW graph index. "recall@8 vs exact" compares this result\'s IDs against Redis\'s own exact (FLAT) result for the identical query — low overlap with an otherwise-correct category usually means many requests tied at the same distance, not a wrong answer (see Methodology).'
+      : 'Exact nearest-neighbor search: every candidate compared, no approximation.';
   }
 
   async function runSemantic(stale) {
@@ -519,28 +539,18 @@ def route_and_answer(query_text):
     const d = await (await fetch(`/api/semantic-search?${params}`)).json();
     if (stale()) return;
     el('q').value = query;
-    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.ms.toFixed(3)} ms`;
+    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`;
     el('rsub').textContent = `median of ${d.runs} · ${d.redis.rows.length} results`;
-    el('osub').textContent = `median of ${d.runs} · ${d.postgres.rows.length} results`;
-    setVerdict(d.redis.ms, d.postgres.ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
-    el('rcount').textContent = ''; el('ocount').textContent = '';
-    el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
+    el('rcount').textContent = '';
+    el('rq').textContent = d.redis.query;
     const cols = corpus === 'sop' ? SOP_COLS : PROCEDURE_COLS;
     el('rbody').replaceChildren(rowsToTable(d.redis.rows, cols));
-    el('obody').replaceChildren(rowsToTable(d.postgres.rows, cols));
-    renderBars(d.redis.ms, d.postgres.ms);
-    el('method').innerHTML = `Vector search combined with ${category ? `a <code>category</code> filter` : 'no filter'}${maxSla ? ` and a <code>max SLA days</code> filter` : ''} in a single query on both engines — not a post-filter step.`;
+    el('method').innerHTML = `Vector search combined with ${category ? `a <code>category</code> filter` : 'no filter'}${maxSla ? ` and a <code>max SLA days</code> filter` : ''} in a single query — not a post-filter step.`;
   }
 
-  function callLogTable(calls, engine) {
-    const cols = engine === 'redis'
-      ? [['Call', 'i'], ['Result', 'tag'], ['Latency', 'ms', 'num', (v) => `${v.toFixed(3)} ms`]]
-      : [['Call', 'i'], ['Latency', 'ms', 'num', (v) => `${v.toFixed(3)} ms`]];
-    const rows = calls.map((c) => ({
-      i: c.i + 1,
-      tag: c.redis_hit ? 'CACHE HIT' : 'cache miss',
-      ms: engine === 'redis' ? c.redis_ms : c.postgres_ms,
-    }));
+  function callLogTable(calls) {
+    const cols = [['Call', 'i'], ['Result', 'tag'], ['Latency', 'ms', 'num', (v) => `${v.toFixed(3)} ms`]];
+    const rows = calls.map((c) => ({ i: c.i + 1, tag: c.hit ? 'CACHE HIT' : 'cache miss', ms: c.ms }));
     return rowsToTable(rows, cols);
   }
 
@@ -553,24 +563,20 @@ def route_and_answer(query_text):
     el('q').value = query;
     const noRepeats = d.redis.repeat_avg_ms == null;
     if (noRepeats) {
-      el('rt').textContent = `${d.redis.first_ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.first_ms.toFixed(3)} ms`;
-      el('rsub').textContent = 'single call (no repeats simulated)'; el('osub').textContent = 'single call (no repeats simulated)';
-      setVerdict(0, 0, { matchOk: false, mismatchLabel: 'simulate 2+ to see a repeat-traffic average' });
+      el('rt').textContent = `${d.redis.first_ms.toFixed(3)} ms`;
+      el('rsub').textContent = 'single call (no repeats simulated)';
     } else {
-      el('rt').textContent = `${d.redis.repeat_avg_ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.repeat_avg_ms.toFixed(3)} ms`;
+      el('rt').textContent = `${d.redis.repeat_avg_ms.toFixed(3)} ms`;
       el('rsub').textContent = `avg of ${d.repeats - 1} repeat calls · first call ${d.redis.first_ms.toFixed(3)} ms`;
-      el('osub').textContent = `avg of ${d.repeats - 1} repeat calls · first call ${d.postgres.first_ms.toFixed(3)} ms`;
-      setVerdict(d.redis.repeat_avg_ms, d.postgres.repeat_avg_ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
     }
-    el('rcount').textContent = ''; el('ocount').textContent = '';
-    el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
-    el('rbody').replaceChildren(callLogTable(d.calls, 'redis'));
-    el('obody').replaceChildren(callLogTable(d.calls, 'postgres'));
-    renderBars(noRepeats ? d.redis.first_ms : d.redis.repeat_avg_ms, noRepeats ? d.postgres.first_ms : d.postgres.repeat_avg_ms);
-    el('method').innerHTML = `Simulating ${d.repeats} people asking the same (or a near-duplicate) question. Redis checks its SemanticCache first — call 1 misses and populates it, every call after that hits and never touches <code>req_flat_idx</code>. Postgres has no caching layer, so it re-runs the full exact search every single call — there is no "first vs. repeat" distinction on that side, by design. The cache is cleared before this simulation starts so call 1 is a genuine miss.`;
+    el('rcount').textContent = '';
+    el('rq').textContent = d.redis.query;
+    el('rbody').replaceChildren(callLogTable(d.calls));
+    const peopleTxt = d.repeats === 1 ? '1 person asking' : `${d.repeats} people asking`;
+    el('method').innerHTML = `Simulating ${peopleTxt} the same (or a near-duplicate) question. RedisVL's SemanticCache is checked first — call 1 misses and populates it, every call after that hits and never touches <code>req_flat_idx</code>. The cache is cleared before this simulation starts so call 1 is a genuine miss.`;
   }
 
-  function routeCard(match, engineName) {
+  function routeCard(match) {
     const card = document.createElement('div');
     card.className = 'route-card' + (match.route ? '' : ' no-match');
     const name = document.createElement('div'); name.className = 'name';
@@ -612,15 +618,12 @@ def route_and_answer(query_text):
     const d = await (await fetch(`/api/semantic-route?${params}`)).json();
     if (stale()) return;
     el('q').value = query;
-    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.ms.toFixed(3)} ms`;
-    el('rsub').textContent = 'median of 3'; el('osub').textContent = 'median of 3';
-    setVerdict(d.redis.ms, d.postgres.ms, { matchOk: d.agree, mismatchLabel: 'engines disagree' });
-    el('rcount').textContent = ''; el('ocount').textContent = '';
-    el('rq').textContent = 'RedisVL SemanticRouter (built-in extension)'; el('oq').textContent = 'Hand-rolled: AVG(cosine distance) per route, filtered by threshold';
-    el('rbody').replaceChildren(routeCard(d.redis.match, 'Redis'));
-    el('obody').replaceChildren(routeCard(d.postgres.match, 'Postgres'));
-    renderBars(d.redis.ms, d.postgres.ms);
-    el('method').innerHTML = 'Both engines average cosine distance to every route\'s reference utterances (RedisVL\'s own default aggregation) and pick the lowest-average route under its distance threshold — the calculation is identical, only the implementation differs: a built-in extension vs hand-written SQL. When the matched intent maps to a searchable corpus, both engines immediately reuse the SAME query embedding to search it — no second embed() call, no manual "which index" logic in application code.';
+    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`;
+    el('rsub').textContent = 'median of 3';
+    el('rcount').textContent = '';
+    el('rq').textContent = 'RedisVL SemanticRouter (built-in extension)';
+    el('rbody').replaceChildren(routeCard(d.redis.match));
+    el('method').innerHTML = 'RedisVL averages cosine distance from the query to every route\'s reference utterances (its own default aggregation) and picks the lowest-average route under its distance threshold. When the matched intent maps to a searchable corpus, the SAME query embedding is immediately reused to search it — no second embed() call, no manual "which index" logic in application code.';
   }
 
   async function runThroughput(stale) {
@@ -628,44 +631,35 @@ def route_and_answer(query_text):
     try { d = await (await fetch('/api/bench-results')).json(); } catch { d = { error: 'no results' }; }
     if (stale()) return;
     if (d.error) {
-      el('rt').textContent = '—'; el('ot').textContent = '—';
-      el('rsub').textContent = ''; el('osub').textContent = '';
-      el('rcount').textContent = ''; el('ocount').textContent = '';
-      el('rq').textContent = ''; el('oq').textContent = '';
-      el('verdict').classList.remove('warn'); el('vx').textContent = '—'; el('vlbl').textContent = 'faster';
-      el('rbody').innerHTML = '<div class="empty">not run yet</div>'; el('obody').innerHTML = '<div class="empty">not run yet</div>';
-      el('bars').replaceChildren();
+      el('rt').textContent = '—';
+      el('rsub').textContent = '';
+      el('rcount').textContent = '';
+      el('rq').textContent = '';
+      el('rbody').innerHTML = '<div class="empty">not run yet</div>';
       el('method').innerHTML = 'Run <b>python src/bench.py</b> in the project directory, then reload.';
       return;
     }
-    const r = d.engines.redis, o = d.engines.postgres;
-    el('rt').textContent = `${r.qps.toLocaleString()} q/s`; el('ot').textContent = `${o.qps.toLocaleString()} q/s`;
-    el('rsub').textContent = `p50 ${r.p50}ms · p99.9 ${r.p999}ms`; el('osub').textContent = `p50 ${o.p50}ms · p99.9 ${o.p999}ms`;
-    setVerdict(r.qps, o.qps, { lowerIsBetter: false });
-    el('rcount').textContent = `${d.concurrency} workers`; el('ocount').textContent = `${d.concurrency} workers`;
+    const r = d.redis;
+    el('rt').textContent = `${r.qps.toLocaleString()} q/s`;
+    el('rsub').textContent = `p50 ${r.p50}ms · p99.9 ${r.p999}ms`;
+    el('rcount').textContent = `${d.concurrency} workers`;
     el('rq').textContent = `concurrency=${d.concurrency} duration=${d.durationSec}s`;
-    el('oq').textContent = el('rq').textContent;
-    const rows = (e) => [['throughput', `${e.qps.toLocaleString()} q/s`], ['p50', `${e.p50} ms`], ['p95', `${e.p95} ms`], ['p99', `${e.p99} ms`], ['p99.9', `${e.p999} ms`], ['max', `${e.max} ms`]];
+    const rows = [['throughput', `${r.qps.toLocaleString()} q/s`], ['p50', `${r.p50} ms`], ['p95', `${r.p95} ms`], ['p99', `${r.p99} ms`], ['p99.9', `${r.p999} ms`], ['max', `${r.max} ms`]];
     const toRows = (data) => { const tb = document.createElement('div'); tb.replaceChildren(...data.map(([k,v]) => { const row=document.createElement('div'); row.style.display='flex'; row.style.justifyContent='space-between'; row.style.padding='0.3rem 0.9rem'; row.style.borderTop='1px solid var(--line)'; row.style.fontSize='0.8rem'; const a=document.createElement('span'); a.textContent=k; const b=document.createElement('span'); b.textContent=v; row.append(a,b); return row; })); return tb; };
-    el('rbody').replaceChildren(toRows(rows(r))); el('obody').replaceChildren(toRows(rows(o)));
-    renderBars(r.p999, o.p999);
-    el('method').innerHTML = 'Concurrent vector-search QPS under worker-based load, engines run sequentially.';
+    el('rbody').replaceChildren(toRows(rows));
+    el('method').innerHTML = 'Concurrent vector-search QPS under worker-based load — see the Throughput section of the README for how to re-run this.';
   }
 
   async function runArchitecture(stale) {
     const d = await (await fetch('/api/architecture')).json();
     if (stale()) return;
-    el('rt').textContent = `${d.redis.db_size.toLocaleString()}`; el('ot').textContent = `${d.postgres.requests.num_rows.toLocaleString()}`;
-    el('rsub').textContent = 'keys'; el('osub').textContent = 'rows in requests';
-    el('verdict').classList.remove('warn'); el('vx').textContent = '—'; el('vlbl').textContent = '';
-    el('rcount').textContent = ''; el('ocount').textContent = '';
+    el('rt').textContent = `${d.redis.db_size.toLocaleString()}`;
+    el('rsub').textContent = 'keys';
+    el('rcount').textContent = '';
     const rIndexes = Object.entries(d.redis).filter(([k]) => k !== 'db_size').map(([k, v]) => `${k}: ${v ? `${v.num_docs} docs, ${v.algorithm || 'n/a'}` : 'n/a'}`).join('\n');
     el('rq').textContent = rIndexes;
-    el('oq').textContent = d.postgres.indexes.map((i) => i.def).join('\n');
-    el('rbody').innerHTML = `<div class="empty">${Object.keys(d.redis).length - 1} indexes + the semantic router — listed above, in the box under "Redis"</div>`;
-    el('obody').replaceChildren(rowsToTable(d.postgres.indexes.map((i) => ({ index: i.name })), [['Index', 'index']]));
-    el('bars').replaceChildren();
-    el('method').innerHTML = 'Live schema introspection: RedisVL indexes (FT.INFO) on the left, Postgres indexes (pg_indexes) on the right.';
+    el('rbody').innerHTML = `<div class="empty">${Object.keys(d.redis).length - 1} indexes + the semantic router — listed above</div>`;
+    el('method').innerHTML = 'Live schema introspection via RedisVL/RediSearch\'s FT.INFO for every index, plus DBSIZE for the total key count.';
   }
 </script>
 </body>

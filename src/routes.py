@@ -1,26 +1,21 @@
 """
 The one definition of "which intent does this customer or case-worker
-question belong to." Plain data — no RedisVL or Postgres import here — so
-both engines' routers are built from literally the same routes, the same
-reference utterances, and the same distance thresholds. redis_store.py
-wraps this into RedisVL Route objects for SemanticRouter; pg_store.py
-loads it straight into a Postgres table and does the nearest-reference
-math by hand. If the two engines ever disagree on a routing decision, the
-question is never "whose route list is right" — there's only one.
+question belong to." Plain data — no RedisVL import here — wrapped into
+RedisVL Route objects for SemanticRouter by redis_store.py.
 
 Every route's `distance_threshold` is a cosine-distance cutoff (0 =
 identical, 2 = opposite) below which a match counts as that route at
-all. Below the threshold, both engines answer "no confident match."
+all. Below the threshold, the router answers "no confident match."
 
 `search_target` names which corpus (`"procedures"`, `"sop"`, or `None`)
 answers this intent directly. This is the "route to the right vector
 search" scenario: once a question is classified, if `search_target` is
-set, both engines immediately run that corpus's own semantic search
-using the SAME query embedding — no second embedding call, no manual
-"which index do I search" logic in application code, just routing
-deciding it. `None` means the intent needs a live case record (an open
-case's current status, an escalation queue) that no static corpus in
-this demo can answer.
+set, RedisVL immediately runs that corpus's own semantic search using
+the SAME query embedding — no second embedding call, no manual "which
+index do I search" logic in application code, just routing deciding it.
+`None` means the intent needs a live case record (an open case's
+current status, an escalation queue) that no static corpus in this demo
+can answer.
 """
 
 ROUTES = [

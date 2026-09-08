@@ -1,12 +1,11 @@
 """
-FastAPI app exposing one endpoint per comparison scenario. Every search
-endpoint runs both engines for the identical query and returns
-{redis: {ms, rows, query}, postgres: {ms, rows, query}, ...} — never a
-precomputed "winner" field; the frontend computes who won from the raw
-ms values it's already displaying; see public/index.html's setVerdict(),
-which exists specifically so this demo never repeats the mistake (made
-and fixed in a sibling demo) of asserting a winner that the visible
-numbers on screen contradict.
+FastAPI app exposing one endpoint per Redis/RedisVL search capability
+showcased in this demo — exact vector search, approximate vector search,
+hybrid semantic search, semantic caching, and semantic routing, all over
+a fictitious bank's customer identity operations data. Every endpoint
+returns {ms, rows, query, ...} straight from Redis; the frontend's job is
+to show that number and explain which Redis feature produced it, not to
+race it against anything.
 """
 
 import json
@@ -16,14 +15,12 @@ import statistics
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-import pg_store as pgs
 import redis_store as rs
 from config import PORT
 
 app = FastAPI()
 
 redis_client = rs.connect()
-pg_conn = pgs.connect()
 router = rs.build_router(redis_client, overwrite=False)
 semantic_cache = rs.build_semantic_cache(redis_client, overwrite=False)
 
@@ -51,24 +48,18 @@ def clamp_runs(v):
 def vector_search(query: str = "address change request", algorithm: str = "flat", limit: int = 10, runs: str = "3"):
     n = clamp_runs(runs)
     if algorithm == "hnsw":
-        r_rows, r_ms, r_q = median_timed(lambda: rs.vector_search_hnsw(redis_client, query, limit), n)
-        p_rows, p_ms, p_q = median_timed(lambda: pgs.vector_search_hnsw(pg_conn, query, limit), n)
+        rows, ms, q = median_timed(lambda: rs.vector_search_hnsw(redis_client, query, limit), n)
         # Recall context: how much does this approximate result overlap
-        # with that SAME engine's exact result for the identical query?
-        r_flat_rows, _, _ = rs.vector_search_flat(redis_client, query, limit)
-        p_flat_rows, _, _ = pgs.vector_search_flat(pg_conn, query, limit)
-        r_recall = _recall(r_rows, r_flat_rows)
-        p_recall = _recall(p_rows, p_flat_rows)
+        # with Redis's OWN exact (FLAT) result for the identical query?
+        flat_rows, _, _ = rs.vector_search_flat(redis_client, query, limit)
+        recall = _recall(rows, flat_rows)
     else:
-        r_rows, r_ms, r_q = median_timed(lambda: rs.vector_search_flat(redis_client, query, limit), n)
-        p_rows, p_ms, p_q = median_timed(lambda: pgs.vector_search_flat(pg_conn, query, limit), n)
-        r_recall = p_recall = None
+        rows, ms, q = median_timed(lambda: rs.vector_search_flat(redis_client, query, limit), n)
+        recall = None
 
     return {
         "query": query, "algorithm": algorithm, "runs": n,
-        "redis": {"ms": r_ms, "rows": r_rows, "query": r_q, "recall_vs_exact": r_recall},
-        "postgres": {"ms": p_ms, "rows": p_rows, "query": p_q, "recall_vs_exact": p_recall},
-        "countsMatch": len(r_rows) == len(p_rows),
+        "redis": {"ms": ms, "rows": rows, "query": q, "recall_vs_exact": recall},
     }
 
 
@@ -88,17 +79,13 @@ def semantic_search(query: str = "process for a duplicate TIN case", corpus: str
     cat = category or None
 
     if corpus == "sop":
-        r_rows, r_ms, r_q = median_timed(lambda: rs.semantic_search_sop(redis_client, query, cat, limit), n)
-        p_rows, p_ms, p_q = median_timed(lambda: pgs.semantic_search_sop(pg_conn, query, cat, limit), n)
+        rows, ms, q = median_timed(lambda: rs.semantic_search_sop(redis_client, query, cat, limit), n)
     else:
-        r_rows, r_ms, r_q = median_timed(lambda: rs.semantic_search_procedures(redis_client, query, cat, max_sla, limit), n)
-        p_rows, p_ms, p_q = median_timed(lambda: pgs.semantic_search_procedures(pg_conn, query, cat, max_sla, limit), n)
+        rows, ms, q = median_timed(lambda: rs.semantic_search_procedures(redis_client, query, cat, max_sla, limit), n)
 
     return {
         "query": query, "corpus": corpus, "category": cat, "max_sla_days": max_sla, "runs": n,
-        "redis": {"ms": r_ms, "rows": r_rows, "query": r_q},
-        "postgres": {"ms": p_ms, "rows": p_rows, "query": p_q},
-        "countsMatch": len(r_rows) == len(p_rows),
+        "redis": {"ms": ms, "rows": rows, "query": q},
     }
 
 
@@ -106,22 +93,15 @@ def semantic_search(query: str = "process for a duplicate TIN case", corpus: str
 def semantic_route(query: str = "I think two of my accounts share the same SSN", runs: str = "3"):
     n = clamp_runs(runs)
 
-    def r_once():
+    def once():
         match, ms = rs.route_query(router, redis_client, query)
         return match, ms, None
 
-    def p_once():
-        match, ms = pgs.route_query(pg_conn, query)
-        return match, ms, None
-
-    r_match, r_ms, _ = median_timed(r_once, n)
-    p_match, p_ms, _ = median_timed(p_once, n)
+    match, ms, _ = median_timed(once, n)
 
     return {
         "query": query, "runs": n,
-        "redis": {"ms": r_ms, "match": r_match},
-        "postgres": {"ms": p_ms, "match": p_match},
-        "agree": r_match.get("route") == p_match.get("route"),
+        "redis": {"ms": ms, "match": match},
     }
 
 
@@ -129,11 +109,9 @@ def semantic_route(query: str = "I think two of my accounts share the same SSN",
 def semantic_cache_demo(query: str = "customer moved to a new address", limit: int = 8, repeats: str = "5"):
     """
     Simulates repeat/popular traffic for the same question: `repeats`
-    sequential calls, same query text each time. Redis checks its
-    SemanticCache first (call 0 misses and populates it; every call
-    after that hits, skipping req_flat_idx entirely). Postgres has no
-    cache, so every single call re-runs the full FLAT scan — there is no
-    "first call" vs "repeat call" distinction on that side, on purpose.
+    sequential calls, same query text each time. RedisVL's SemanticCache
+    is checked first on every call — call 0 misses and populates it,
+    every call after that hits and never touches req_flat_idx.
 
     The cache is cleared at the start of every call to this endpoint so
     "call 0" is a genuine miss each time the demo is run, not a hit left
@@ -144,9 +122,8 @@ def semantic_cache_demo(query: str = "customer moved to a new address", limit: i
 
     calls = []
     for i in range(n):
-        r_rows, r_ms, r_hit, r_desc = rs.cached_request_search(semantic_cache, redis_client, query, limit=limit)
-        p_rows, p_ms, p_query = pgs.vector_search_flat(pg_conn, query, limit=limit)
-        calls.append({"i": i, "redis_ms": r_ms, "redis_hit": r_hit, "redis_desc": r_desc, "postgres_ms": p_ms})
+        rows, ms, hit, desc = rs.cached_request_search(semantic_cache, redis_client, query, limit=limit)
+        calls.append({"i": i, "ms": ms, "hit": hit, "desc": desc})
 
     # With repeats=1 there were no repeat calls at all — reporting the
     # single (miss) call's latency as "repeat average" would silently
@@ -157,22 +134,16 @@ def semantic_cache_demo(query: str = "customer moved to a new address", limit: i
     return {
         "query": query, "repeats": n, "calls": calls,
         "redis": {
-            "rows": r_rows, "query": r_desc,
-            "first_ms": calls[0]["redis_ms"],
-            "repeat_avg_ms": statistics.mean(c["redis_ms"] for c in repeat_calls) if repeat_calls else None,
+            "rows": rows, "query": desc,
+            "first_ms": calls[0]["ms"],
+            "repeat_avg_ms": statistics.mean(c["ms"] for c in repeat_calls) if repeat_calls else None,
         },
-        "postgres": {
-            "rows": p_rows, "query": p_query,
-            "first_ms": calls[0]["postgres_ms"],
-            "repeat_avg_ms": statistics.mean(c["postgres_ms"] for c in repeat_calls) if repeat_calls else None,
-        },
-        "countsMatch": len(r_rows) == len(p_rows),
     }
 
 
 @app.get("/api/architecture")
 def architecture():
-    return {"redis": rs.architecture_info(redis_client), "postgres": pgs.architecture_info(pg_conn)}
+    return {"redis": rs.architecture_info(redis_client)}
 
 
 @app.get("/api/bench-results")

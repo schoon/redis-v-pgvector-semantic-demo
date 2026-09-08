@@ -1,17 +1,15 @@
 """
-Concurrent vector-search throughput, Redis vs Postgres, engines run
-sequentially (never simultaneously). Mirrors the benchmark shape used in
-the sibling Node.js demos in this series: fixed concurrency, a warm-up
-window, then a measured window, percentiles computed from every request's
-latency, not just the mean.
+Concurrent vector-search throughput against Redis alone. Mirrors the
+benchmark shape used in the sibling demos in this series: fixed
+concurrency, a warm-up window, then a measured window, percentiles
+computed from every request's latency, not just the mean.
 
 The query vector is embedded ONCE before the timed run and reused by
-every worker thread — see redis_store.vector_search_flat/hnsw and
-pg_store's equivalents, which accept a precomputed `vector=` to skip
-embed() entirely. Embedding is a single-threaded, GIL-bound CPU
-operation; if every request re-embedded the same text, concurrent
-"throughput" would mostly measure how fast one CPU core can run the
-embedding model, not either datastore.
+every worker thread — see redis_store.vector_search_flat, which accepts
+a precomputed `vector=` to skip embed() entirely. Embedding is a
+single-threaded, GIL-bound CPU operation; if every request re-embedded
+the same text, concurrent "throughput" would mostly measure how fast one
+CPU core can run the embedding model, not Redis.
 
     python src/bench.py
     python src/bench.py --concurrency=16 --duration=8
@@ -23,9 +21,6 @@ import os
 import threading
 import time
 
-import numpy as np
-
-import pg_store as pgs
 import redis_store as rs
 from config import DATA_DIR
 from embeddings import embed
@@ -110,15 +105,6 @@ def bench_redis(vec, concurrency, warmup_s, duration_s):
     return run_workers(make_worker, concurrency, warmup_s, duration_s)
 
 
-def bench_postgres(vec, concurrency, warmup_s, duration_s):
-    pgvec = np.asarray(vec, dtype="float32")
-
-    def make_worker():
-        conn = pgs.connect()
-        return lambda: pgs.vector_search_flat(conn, limit=8, vector=pgvec)
-    return run_workers(make_worker, concurrency, warmup_s, duration_s)
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--concurrency", type=int, default=16)
@@ -127,27 +113,18 @@ def main():
     args = parser.parse_args()
 
     print("Concurrent throughput — exact (FLAT) vector search over 40,000 identity-ops requests")
-    print(f"  concurrency: {args.concurrency} threads per engine")
-    print(f"  duration:    {args.duration}s measured, {args.warmup}s warm-up")
-    print("  engines run sequentially, never simultaneously\n")
+    print(f"  concurrency: {args.concurrency} threads")
+    print(f"  duration:    {args.duration}s measured, {args.warmup}s warm-up\n")
 
     vec = embed(QUERY_TEXT)
 
-    print("  redis: warming up... measuring...")
-    redis_result = bench_redis(vec, args.concurrency, args.warmup, args.duration)
-    print("  redis: done")
-
-    print("  postgres: warming up... measuring...")
-    postgres_result = bench_postgres(vec, args.concurrency, args.warmup, args.duration)
-    print("  postgres: done\n")
+    print("  warming up... measuring...")
+    result = bench_redis(vec, args.concurrency, args.warmup, args.duration)
+    print("  done\n")
 
     header = f"{'':10}{'QPS':>10}{'p50':>10}{'p95':>10}{'p99':>10}{'p99.9':>10}{'max':>10}{'errors':>10}"
     print(header)
-    for name, r in (("redis", redis_result), ("postgres", postgres_result)):
-        print(f"{name:10}{r['qps']:>10}{r['p50']:>10}{r['p95']:>10}{r['p99']:>10}{r['p999']:>10}{r['max']:>10}{r['errors']:>10}")
-
-    ratio = redis_result["qps"] / postgres_result["qps"] if postgres_result["qps"] else float("inf")
-    print(f"\n  throughput ratio: {ratio:.2f}x (redis / postgres)")
+    print(f"{'redis':10}{result['qps']:>10}{result['p50']:>10}{result['p95']:>10}{result['p99']:>10}{result['p999']:>10}{result['max']:>10}{result['errors']:>10}")
 
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(RESULTS_FILE, "w") as f:
@@ -155,7 +132,7 @@ def main():
             "concurrency": args.concurrency,
             "durationSec": args.duration,
             "query": QUERY_TEXT,
-            "engines": {"redis": redis_result, "postgres": postgres_result},
+            "redis": result,
         }, f, indent=2)
     print(f"\n  results written to {RESULTS_FILE}")
 

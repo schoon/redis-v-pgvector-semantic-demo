@@ -22,12 +22,7 @@ functions the rest of this file uses (via `CustomTextVectorizer`), so
 
 `build_semantic_cache()`/`cached_request_search()` use RedisVL's
 `SemanticCache` extension the same way — same shared vectorizer, no
-separate embedding path. There is no Postgres/pgvector equivalent to
-compare it against feature-for-feature: pgvector has no caching
-primitive, so the Postgres side of that scenario is just
-`pg_store.vector_search_flat()`, called fresh every time, exactly like
-the plain exact-search scenario. That asymmetry is the point of this
-scenario, not an oversight.
+separate embedding path.
 """
 
 import json
@@ -65,11 +60,9 @@ def connect():
 # low for good recall: a plain-language query like "address change" (not
 # a copy of any stored description) missed its entire target cluster
 # and returned unrelated requests instead, 0% overlap with the exact
-# result. Raising ef_runtime to 40 (matching pgvector's
-# hnsw.ef_search=40 below, for a genuinely comparable configuration on
-# both engines, not a thumb on the scale) fixed it. Don't drop this back
-# to the library default on the theory that it's unnecessary tuning —
-# it's the difference between a working and a broken HNSW scenario here.
+# result. Raising ef_runtime to 40 fixed it. Don't drop this back to the
+# library default on the theory that it's unnecessary tuning — it's the
+# difference between a working and a broken HNSW scenario here.
 HNSW_EF_RUNTIME = 40
 HNSW_M = 16
 HNSW_EF_CONSTRUCTION = 200
@@ -166,9 +159,8 @@ def create_indexes(client):
 # when you attach an index to an existing keyspace) — a plain-language
 # query with no exact match in the corpus ("address change") missed its
 # entire target cluster with the former and found it cleanly with the
-# latter, same data, same M/ef_construction/ef_runtime either way. This
-# mirrors pgvector's own documented advice to build the HNSW index after
-# the bulk load, not before — don't move this back to create_indexes().
+# latter, same data, same M/ef_construction/ef_runtime either way. Don't
+# move this back to create_indexes().
 def create_hnsw_index(client):
     get_index(client, REQ_HNSW_INDEX).create(overwrite=True, drop=True)
     wait_for_indexing(client, REQ_HNSW_INDEX)
@@ -343,11 +335,10 @@ def build_router(client, overwrite=False):
 def route_query(router, client, query_text):
     # Embed BEFORE starting the timer and call router(vector=...), not
     # router(statement=...) — the latter embeds internally, which would
-    # charge Redis's measured time for the same embedding step that
-    # pg_store.route_query() already excludes (it embeds before its own
-    # t0 too). Measured impact of getting this wrong: ~6ms of embedding
-    # time on top of a genuine ~0.7ms Redis round trip — enough on its
-    # own to flip who looks faster.
+    # charge the measured time with a local, single-threaded embedding
+    # step (~6ms on a laptop) that has nothing to do with the actual
+    # Redis round trip (~0.7ms). Measure the datastore, not the CPU-bound
+    # embedding model.
     vec = embed(query_text)
     t0 = time.perf_counter()
     match = router(vector=vec)
@@ -399,10 +390,10 @@ def build_semantic_cache(client, overwrite=False):
 
 # Caches request search results, not procedure search — the point of
 # this scenario is "repeating an expensive question shouldn't repeat the
-# expensive work," and the exact/FLAT request search is the expensive
-# operation in this demo (Postgres ~15-18ms; see the vector search
-# scenario). Caching the 15-row procedure search would barely be visible
-# against either engine's already-sub-millisecond cost there.
+# expensive work," and the exact/FLAT request search over 40,000 rows is
+# the most expensive operation in this demo. Caching the 15-row
+# procedure search would barely be visible against its already-
+# sub-millisecond cost.
 #
 # Embedding happens BEFORE the timer starts, same convention as every
 # other scenario in this file — a cache hit and a cache miss both still
