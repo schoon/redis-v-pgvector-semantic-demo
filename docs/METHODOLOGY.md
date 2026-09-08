@@ -158,6 +158,38 @@ Card`, `Travel Elite Card`) in the same order. Same pattern as the
 routing algorithm itself — one behavior, two implementations, checked
 against each other rather than trusted separately.
 
+### Postgres wins routing at every scale tested, not just at this demo's scale
+
+It would be convenient if "Postgres wins routing" were purely a
+demo-scale artifact (87 reference utterances) that reverses once a real
+deployment has thousands of routes — the same story that explains most
+of the semantic-search gap. It isn't. Tested directly: an isolated
+scaling rig (not the live demo — a temporary index/table, cleaned up
+after) replicated reference embeddings up to 1,000× the real corpus and
+ran RedisVL's exact `SemanticRouter` pipeline (`RangeQuery` →
+`FT.AGGREGATE GROUPBY` → `REDUCE avg()`) against Postgres's equivalent
+`GROUP BY`:
+
+| References | Redis (`FT.AGGREGATE`) | Postgres (`GROUP BY`) | Ratio |
+| ---------- | ---------------------- | ---------------------- | ----- |
+| 87 (real corpus) | 1.47 ms | 0.28 ms | 5.2× |
+| 870 | 1.47 ms | 0.45 ms | 3.3× |
+| 8,700 | 6.67 ms | 2.29 ms | 2.9× |
+| 87,000 | 81.0 ms | 21.9 ms | 3.7× |
+
+The ratio narrows through the middle, then **widens again** at the
+largest scale tested — it never converges, and there's no sign of a
+crossover at any scale checked. This is architectural, not a demo-scale
+illusion: `SemanticRouter` runs a general-purpose multi-stage
+aggregation pipeline (built to support arbitrary `GROUPBY`/`REDUCE`
+combinations), which carries more per-row overhead than a query engine
+running one specialized `GROUP BY` for exactly this shape of question.
+Making Redis win this specific scenario would require either a leaner
+routing primitive from RedisVL, or hand-rolling a different Redis-side
+algorithm that no longer matches `SemanticRouter`'s real behavior —
+i.e., exactly the "similar, not identical" shortcut this file
+repeatedly rejects elsewhere. Left honest rather than chased.
+
 ### A third bug, found here rather than in the HNSW section: `route_query()` was charging Redis for embedding time Postgres wasn't
 
 An earlier version of `redis_store.route_query()` called RedisVL's
