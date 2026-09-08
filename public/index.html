@@ -238,6 +238,7 @@ def route_and_answer(query_text):
       <button data-s="semantic">Semantic search</button>
       <button data-s="cache">Semantic caching</button>
       <button data-s="route">Semantic routing</button>
+      <button data-s="dup">Duplicate detection</button>
       <button data-s="throughput">Throughput</button>
       <button data-s="architecture">Architecture</button>
     </div>
@@ -263,6 +264,13 @@ def route_and_answer(query_text):
 
     <div class="filters" id="cacheFilters">
       <label class="inline">simulate <input type="number" id="cacheRepeats" style="width:5rem" value="5" min="1" max="20"> repeat questions</label>
+    </div>
+
+    <div class="filters" id="dupFilters">
+      <input type="text" id="dupName" placeholder="Full name" style="min-width:10rem">
+      <input type="text" id="dupTin" placeholder="TIN (e.g. 512-33-9981)" style="min-width:11rem">
+      <input type="text" id="dupCity" placeholder="City" style="min-width:8rem">
+      <input type="text" id="dupState" placeholder="State" style="width:4rem">
     </div>
 
     <div class="progress" id="progress"></div>
@@ -359,6 +367,15 @@ def route_and_answer(query_text):
         diagramId: 'routeDiagramOverlay',
       },
     },
+    dup: {
+      hint: 'Check a new identity submission against the existing customer base — an exact-TIN Bloom filter plus a fuzzy name/city/state vector match, run together.',
+      dupFilters: true, hideQuery: true, noRuns: true,
+      explain: {
+        title: 'Duplicate detection at intake — RedisBloom + vector similarity',
+        body: 'Before a new identity record is created, two independent checks run against the existing customer base: a Bloom filter for a cheap, guaranteed-no-false-negative check on the exact TIN (BF.EXISTS is O(1) and a fraction of a Set\'s memory), confirmed against a real index only when the filter says "maybe"; and a vector similarity search over name/city/state text that catches near-duplicates sharing no exact TIN at all — a middle initial, a suffix, the same person entered twice. Redis runs both checks from one process.',
+        code: 'BF.EXISTS tin_seen "512-33-9981"        # O(1) — "definitely new" or "maybe seen"\nSMEMBERS tin:512-33-9981                # confirm a "maybe" against the real set\nFT.SEARCH customer_idx "*=>[KNN 3 @embedding $vec]"   # fuzzy profile match',
+      },
+    },
     throughput: {
       hint: 'Concurrent vector-search QPS under worker-based load — how much one Redis instance can carry.',
       noControls: true,
@@ -410,8 +427,10 @@ def route_and_answer(query_text):
     renderExplain(cfg.explain);
     el('controls').style.display = cfg.noControls ? 'none' : '';
     el('runs').closest('label').style.display = cfg.noRuns ? 'none' : '';
+    el('q').style.display = cfg.hideQuery ? 'none' : '';
     el('semanticFilters').classList.toggle('show', Boolean(cfg.filters));
     el('cacheFilters').classList.toggle('show', Boolean(cfg.cacheFilters));
+    el('dupFilters').classList.toggle('show', Boolean(cfg.dupFilters));
     el('summary').hidden = false;
     el('panes').hidden = false;
     if (next === 'route') {
@@ -425,16 +444,25 @@ def route_and_answer(query_text):
   }
   el('scenarios').addEventListener('click', (e) => { if (e.target.dataset.s) setScenario(e.target.dataset.s); });
 
+  let dupExamplesCache = null;
   el('randomQuery').addEventListener('click', async () => {
     if (scenario === 'route') {
       if (!routesCache) routesCache = await (await fetch('/api/routes')).json();
       el('q').value = routesCache[Math.floor(Math.random() * routesCache.length)].sample;
+    } else if (scenario === 'dup') {
+      if (!dupExamplesCache) dupExamplesCache = await (await fetch('/api/duplicate-examples')).json();
+      const ex = dupExamplesCache[Math.floor(Math.random() * dupExamplesCache.length)];
+      el('dupName').value = ex.name; el('dupTin').value = ex.tin;
+      el('dupCity').value = ex.city; el('dupState').value = ex.state;
     } else {
       const pool = EXAMPLES[scenario] || EXAMPLES.flat;
       el('q').value = pool[Math.floor(Math.random() * pool.length)];
     }
     search();
   });
+  for (const id of ['dupName', 'dupTin', 'dupCity', 'dupState']) {
+    el(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+  }
   el('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
   el('runs').addEventListener('change', search);
   el('semCorpus').addEventListener('change', () => { populateCategoryOptions(); search(); });
@@ -489,6 +517,8 @@ def route_and_answer(query_text):
   const PROCEDURE_COLS = [['Name', 'name'], ['Category', 'category'], ['SLA (days)', 'sla_days', 'num', (v) => `${v}`],
     ['Score', 'score', 'num', (v) => v.toFixed(3)]];
   const SOP_COLS = [['Category', 'category'], ['Title', 'title'], ['Score', 'score', 'num', (v) => v.toFixed(3)]];
+  const DUP_COLS = [['Customer', 'customer_id'], ['Name', 'name'], ['City', 'city'], ['State', 'state'],
+    ['Score', 'score', 'num', (v) => v.toFixed(3)], ['Flag', 'near_duplicate', null, (v) => v ? '⚠ possible duplicate' : '']];
 
   async function search() {
     const seq = ++inflight;
@@ -500,6 +530,7 @@ def route_and_answer(query_text):
       else if (scenario === 'semantic') await runSemantic(stale);
       else if (scenario === 'cache') await runSemanticCache(stale);
       else if (scenario === 'route') await runRoute(stale);
+      else if (scenario === 'dup') await runDuplicateCheck(stale);
       else if (scenario === 'throughput') await runThroughput(stale);
       else if (scenario === 'architecture') await runArchitecture(stale);
     } catch (err) {
@@ -626,6 +657,60 @@ def route_and_answer(query_text):
     el('method').innerHTML = 'RedisVL averages cosine distance from the query to every route\'s reference utterances (its own default aggregation) and picks the lowest-average route under its distance threshold. When the matched intent maps to a searchable corpus, the SAME query embedding is immediately reused to search it — no second embed() call, no manual "which index" logic in application code.';
   }
 
+  function duplicateResultCard(redis) {
+    const card = document.createElement('div');
+    card.className = 'route-card';
+
+    const hasExact = redis.exact_matches.length > 0;
+    const hasFuzzy = redis.fuzzy_matches.some((m) => m.near_duplicate);
+    const name = document.createElement('div'); name.className = 'name';
+    name.textContent = hasExact
+      ? 'Duplicate TIN — exact match found'
+      : hasFuzzy ? 'Possible duplicate profile — review recommended' : 'No duplicate signal';
+    card.append(name);
+
+    const bloomLine = document.createElement('div'); bloomLine.className = 'desc';
+    bloomLine.textContent = redis.maybe_seen
+      ? `BF.EXISTS: maybe seen (${redis.bloom_ms.toFixed(3)} ms)`
+      : `BF.EXISTS: definitely new — no existing customer has this TIN (${redis.bloom_ms.toFixed(3)} ms)`;
+    card.append(bloomLine);
+
+    if (redis.maybe_seen) {
+      const exactLine = document.createElement('div'); exactLine.className = 'action';
+      exactLine.textContent = hasExact
+        ? `→ Confirmed via SMEMBERS (${redis.exact_ms.toFixed(3)} ms): TIN already on file for ${redis.exact_matches.join(', ')}`
+        : `→ Bloom flagged a possible match, but SMEMBERS found none (${redis.exact_ms.toFixed(3)} ms) — a false positive, expected at roughly the filter's configured error rate.`;
+      card.append(exactLine);
+    }
+
+    const fuzzyHeader = document.createElement('div'); fuzzyHeader.className = 'action';
+    fuzzyHeader.style.marginTop = '0.6rem';
+    fuzzyHeader.textContent = `→ Fuzzy name/city/state match (${redis.fuzzy_ms.toFixed(3)} ms):`;
+    card.append(fuzzyHeader);
+    card.append(rowsToTable(redis.fuzzy_matches, DUP_COLS));
+    return card;
+  }
+
+  async function runDuplicateCheck(stale) {
+    const name = el('dupName').value.trim() || 'Robert Smith';
+    const tin = el('dupTin').value.trim() || '512-33-9981';
+    const city = el('dupCity').value.trim() || 'Charlotte';
+    const state = el('dupState').value.trim() || 'NC';
+    const params = new URLSearchParams({ name, tin, city, state });
+    const d = await (await fetch(`/api/duplicate-check?${params}`)).json();
+    if (stale()) return;
+    el('dupName').value = name; el('dupTin').value = tin; el('dupCity').value = city; el('dupState').value = state;
+
+    const r = d.redis;
+    const totalMs = r.bloom_ms + (r.exact_ms || 0) + r.fuzzy_ms;
+    el('rt').textContent = `${totalMs.toFixed(3)} ms`;
+    el('rsub').textContent = `bloom ${r.bloom_ms.toFixed(3)}ms${r.exact_ms != null ? ` + exact ${r.exact_ms.toFixed(3)}ms` : ''} + fuzzy ${r.fuzzy_ms.toFixed(3)}ms`;
+    el('rcount').textContent = '';
+    el('rq').textContent = `BF.EXISTS tin_seen "${tin}"${r.maybe_seen ? ` -> SMEMBERS tin:${tin}` : ''}\nFT.SEARCH customer_idx "*=>[KNN 3 @embedding $vec]" on "${name}, ${city}, ${state}"`;
+    el('rbody').replaceChildren(duplicateResultCard(r));
+    el('method').innerHTML = 'Two independent Redis primitives, neither of them RedisVL: a Bloom filter (BF.EXISTS) for a hard, guaranteed-no-false-negative check on the exact TIN, confirmed against a real Set only when the filter says "maybe" — and a plain FT.SEARCH vector KNN over name/city/state text for near-duplicates that share no exact TIN at all. The "possible duplicate" flag on a fuzzy row fires under a cosine-distance threshold measured directly against real name variants vs. unrelated same-last-name namesakes (see Methodology).';
+  }
+
   async function runThroughput(stale) {
     let d;
     try { d = await (await fetch('/api/bench-results')).json(); } catch { d = { error: 'no results' }; }
@@ -656,10 +741,15 @@ def route_and_answer(query_text):
     el('rt').textContent = `${d.redis.db_size.toLocaleString()}`;
     el('rsub').textContent = 'keys';
     el('rcount').textContent = '';
-    const rIndexes = Object.entries(d.redis).filter(([k]) => k !== 'db_size').map(([k, v]) => `${k}: ${v ? `${v.num_docs} docs, ${v.algorithm || 'n/a'}` : 'n/a'}`).join('\n');
+    const describe = (v) => {
+      if (!v) return 'n/a';
+      if ('capacity' in v) return `${v.items_inserted} items inserted, ${v.size_bytes} bytes, capacity ${v.capacity} (BF.INFO)`;
+      return `${v.num_docs} docs, ${v.algorithm || 'n/a'}`;
+    };
+    const rIndexes = Object.entries(d.redis).filter(([k]) => k !== 'db_size').map(([k, v]) => `${k}: ${describe(v)}`).join('\n');
     el('rq').textContent = rIndexes;
-    el('rbody').innerHTML = `<div class="empty">${Object.keys(d.redis).length - 1} indexes + the semantic router — listed above</div>`;
-    el('method').innerHTML = 'Live schema introspection via RedisVL/RediSearch\'s FT.INFO for every index, plus DBSIZE for the total key count.';
+    el('rbody').innerHTML = `<div class="empty">${Object.keys(d.redis).length - 1} structures (indexes, the semantic router, and the TIN bloom filter) — listed above</div>`;
+    el('method').innerHTML = 'Live schema introspection via RedisVL/RediSearch\'s FT.INFO for every index, RedisBloom\'s BF.INFO for the TIN filter, and DBSIZE for the total key count.';
   }
 </script>
 </body>

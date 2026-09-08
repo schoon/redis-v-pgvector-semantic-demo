@@ -1,10 +1,8 @@
 """
 Loads the embedded corpus into Redis: two request indexes (FLAT and
-HNSW, same underlying data), the procedure and SOP hybrid-search indexes,
-and the semantic router. Customer data is generated (see generate.py)
-for narrative color but isn't loaded here — no scenario in this demo
-queries requests scoped to one customer, so there's nothing for that
-file to join against.
+HNSW, same underlying data), the procedure and SOP hybrid-search
+indexes, the customer index + TIN Bloom filter + exact TIN index for
+duplicate-identity detection, and the semantic router.
 """
 
 import json
@@ -25,7 +23,7 @@ def main():
     client.ping()
     print(f"Connected to Redis.")
 
-    print("Flushing and creating indexes (req_flat_idx, procedure_idx, sop_idx)...")
+    print("Flushing and creating indexes (req_flat_idx, procedure_idx, sop_idx, customer_idx)...")
     client.flushall()
     rs.create_indexes(client)
 
@@ -61,6 +59,22 @@ def main():
     rs.load_sops(client, sops)
     print(f"  {len(sops):,} articles loaded into sop_idx")
 
+    print("Loading customers (for duplicate detection)...")
+    customers = read_jsonl(DATA_FILES["customers"])
+    # Embedded on name only -- city/state are filtered on exactly in
+    # check_duplicate(), not blended into the fuzzy-matched text. See
+    # redis_store.py's customer_idx schema comment for why.
+    vecs = embed_many([c["name"] for c in customers])
+    for c, v in zip(customers, vecs):
+        c["embedding"] = v
+    rs.load_customers(client, customers)
+    print(f"  {len(customers):,} customers loaded into customer_idx")
+
+    print("Building TIN bloom filter + exact TIN index...")
+    rs.build_tin_bloom(client, [c["tin"] for c in customers])
+    rs.load_tin_index(client, customers)
+    print("  done")
+
     print("Building semantic router (embedding route reference utterances)...")
     t0 = time.time()
     rs.build_router(client, overwrite=True)
@@ -71,6 +85,7 @@ def main():
     rs.vector_search_hnsw(client, "warm up query", limit=1)
     rs.semantic_search_procedures(client, "warm up query", limit=1)
     rs.semantic_search_sop(client, "warm up query", limit=1)
+    rs.check_duplicate(client, "Warm Up", "Nowhere", "ZZ", "000-00-0000")
     router = rs.build_router(client, overwrite=False)
     rs.route_query(router, client, "warm up query")
     cache = rs.build_semantic_cache(client, overwrite=False)

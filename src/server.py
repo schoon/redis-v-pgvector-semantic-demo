@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 import redis_store as rs
-from config import PORT
+from config import DATA_FILES, PORT
 
 app = FastAPI()
 
@@ -141,6 +141,12 @@ def semantic_cache_demo(query: str = "customer moved to a new address", limit: i
     }
 
 
+@app.get("/api/duplicate-check")
+def duplicate_check(name: str = "Robert Smith", city: str = "Charlotte", state: str = "NC", tin: str = "512-33-9981"):
+    result = rs.check_duplicate(redis_client, name, city, state, tin)
+    return {"name": name, "city": city, "state": state, "tin": tin, "redis": result}
+
+
 @app.get("/api/architecture")
 def architecture():
     return {"redis": rs.architecture_info(redis_client)}
@@ -162,6 +168,12 @@ def list_routes():
         {"name": r["name"], "description": r["description"], "sample": r["references"][0]}
         for r in ROUTES
     ]
+
+
+@app.get("/api/duplicate-examples")
+def duplicate_examples():
+    with open(DATA_FILES["duplicate_check_examples"]) as f:
+        return [json.loads(line) for line in f]
 
 
 _PUBLIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public")

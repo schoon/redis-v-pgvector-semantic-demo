@@ -1,8 +1,9 @@
 # redis-v-pgvector-semantic-demo
 
-**Vector search**, **hybrid semantic search**, **semantic caching**, and
-**semantic intent routing** — all built on **Redis** and **RedisVL** —
-over a fictitious bank's customer identity operations: the requests
+**Vector search**, **hybrid semantic search**, **semantic caching**,
+**semantic intent routing**, and **Bloom-filter + vector duplicate
+detection** — all built on **Redis** (RedisVL and RedisBloom) — over a
+fictitious bank's customer identity operations: the requests
 that keep customer identity records accurate and compliant (address
 updates, duplicate TIN/SSN resolution, and related customer-data
 maintenance and due-diligence work), a procedure catalog, and a support
@@ -66,6 +67,7 @@ No volumes are declared, so this discards the data. Re-run
 | **Semantic search** | `FT.SEARCH` combining a vector KNN clause with TAG/NUMERIC filters, one query |
 | **Semantic caching** | RedisVL `SemanticCache` (built-in extension) — repeat/similar questions hit the cache, skip the search entirely |
 | **Semantic routing** | RedisVL `SemanticRouter` (built-in extension); a matched intent immediately reuses the same query embedding to search the right corpus |
+| **Duplicate detection** | RedisBloom `BF.EXISTS` for an exact-TIN check, confirmed via `SMEMBERS`, plus a `FT.SEARCH` vector KNN filtered by city for fuzzy name matches |
 | **Concurrent throughput** | `python src/bench.py` — worker threads hitting `FT.SEARCH` concurrently |
 | **Architecture** | live schema introspection (`FT.INFO`, `DBSIZE`) |
 
@@ -87,6 +89,9 @@ a 14-core Apple-silicon MacBook. Median of 3 runs per sample.
 | Semantic caching — first call (miss) | 5.5–9.4 ms |
 | Semantic caching — repeat calls (avg) | 0.7–2.3 ms |
 | Semantic routing | 1.5–2.3 ms |
+| Duplicate detection — Bloom check (`BF.EXISTS`) | 0.6–4.7 ms |
+| Duplicate detection — exact confirm (`SMEMBERS`, on a "maybe") | 0.5–1.6 ms |
+| Duplicate detection — fuzzy match (`FT.SEARCH`, city-filtered) | 1.6–8.8 ms |
 
 **Semantic caching's repeat-call numbers are the clearest illustration
 of what a cache buys you.** A repeated or paraphrased question skips
@@ -104,6 +109,17 @@ distance. `validate.py` checks correctness by distance value against a
 tie-aware threshold, not raw ID overlap, and passes cleanly even when
 the UI's simpler "recall vs exact" percentage looks unimpressive — see
 [Methodology](docs/METHODOLOGY.md) for the full explanation.
+
+**Duplicate detection's fuzzy layer catches 98% of seeded near-duplicate
+profiles at a measured 0.56% false-positive rate — not 100%/0%, and
+that's disclosed rather than hidden.** Two unrelated people who happen
+to share a last name and a city land closer together in embedding
+space than you'd hope; a real near-duplicate (a middle initial added, a
+suffix) lands closer still, but the two distributions genuinely overlap
+in the tail. See [Methodology](docs/METHODOLOGY.md) for the full
+measurement, including the two design changes (city as an exact filter
+instead of blended text, larger name pools) that got the overlap this
+small in the first place.
 
 ## Concurrent throughput
 
@@ -136,7 +152,7 @@ being internally consistent with itself proves nothing on its own;
 every check here is against ground truth computed with no help from
 RedisVL at all.
 
-**Last clean run: 7 checks, 7 passed, 0 failed.**
+**Last clean run: 10 checks, 10 passed, 0 failed.**
 
 ## Configuration
 

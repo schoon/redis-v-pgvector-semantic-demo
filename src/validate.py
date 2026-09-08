@@ -199,6 +199,44 @@ def main():
     record("Route-to-search top hit == brute-force ground truth", search_mismatch == 0,
            f"{search_checked} routed utterances checked, {search_mismatch} mismatches")
 
+    # ---- Duplicate-identity detection: Bloom filter + fuzzy vector match ---
+    print("\nChecking duplicate-check examples (held-out submissions, never loaded into customer_idx)...")
+    examples = read_jsonl(DATA_FILES["duplicate_check_examples"])
+
+    clean = [e for e in examples if e["kind"] == "clean"]
+    clean_checked, clean_mismatch = 0, 0
+    for ex in clean:
+        result = rs.check_duplicate(redis_client, ex["name"], ex["city"], ex["state"], ex["tin"])
+        clean_checked += 1
+        # A Bloom filter can never false-negative by construction — a
+        # genuinely unseen TIN checked against BF.EXISTS must return
+        # False every time, not "usually."
+        if result["maybe_seen"] is not False:
+            clean_mismatch += 1
+    record("Bloom filter never false-negatives a fresh TIN", clean_mismatch == 0,
+           f"{clean_checked} clean examples checked, {clean_mismatch} mismatches")
+
+    exact_dup = [e for e in examples if e["kind"] == "exact_duplicate"]
+    exact_checked, exact_mismatch = 0, 0
+    for ex in exact_dup:
+        result = rs.check_duplicate(redis_client, ex["name"], ex["city"], ex["state"], ex["tin"])
+        exact_checked += 1
+        if not (result["maybe_seen"] and result["exact_matches"]):
+            exact_mismatch += 1
+    record("Seeded duplicate-TIN examples are confirmed via the exact index", exact_mismatch == 0,
+           f"{exact_checked} exact-duplicate examples checked, {exact_mismatch} mismatches")
+
+    near_dup = [e for e in examples if e["kind"] == "near_duplicate"]
+    near_checked, near_mismatch = 0, 0
+    for ex in near_dup:
+        result = rs.check_duplicate(redis_client, ex["name"], ex["city"], ex["state"], ex["tin"])
+        near_checked += 1
+        top_ids = [m["customer_id"] for m in result["fuzzy_matches"]]
+        if ex["near_duplicate_of"] not in top_ids:
+            near_mismatch += 1
+    record("Near-duplicate profiles surface their true source in top-3 fuzzy matches", near_mismatch == 0,
+           f"{near_checked} near-duplicate examples checked, {near_mismatch} mismatches")
+
     failed = [c for c, p in results if not p]
     print(f"\n  {len(results)} checks · {len(results) - len(failed)} passed · {len(failed)} failed")
     if failed:

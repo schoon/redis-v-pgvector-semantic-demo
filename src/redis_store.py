@@ -23,6 +23,12 @@ functions the rest of this file uses (via `CustomTextVectorizer`), so
 `build_semantic_cache()`/`cached_request_search()` use RedisVL's
 `SemanticCache` extension the same way — same shared vectorizer, no
 separate embedding path.
+
+`check_duplicate()` is the odd one out: it doesn't use RedisVL at all.
+Duplicate-identity detection at intake runs two independent Redis
+primitives — a `BF.*` Bloom filter for an exact-TIN check, and a plain
+`FT.SEARCH` vector KNN for a fuzzy name/city/state check — neither of
+which is a RedisVL search scenario like the rest of this file.
 """
 
 import json
@@ -38,17 +44,22 @@ from redisvl.query.filter import Num, Tag
 from redisvl.schema import IndexSchema
 from redisvl.utils.vectorize import CustomTextVectorizer
 
-from config import REDIS_URL, VECTOR_DIM
+from config import (
+    NEAR_DUPLICATE_DISTANCE_THRESHOLD, REDIS_URL, TIN_BLOOM_CAPACITY,
+    TIN_BLOOM_ERROR_RATE, VECTOR_DIM,
+)
 from embeddings import embed, embed_many
 from routes import ROUTES
 
 REQ_FLAT_INDEX = "req_flat_idx"
 REQ_HNSW_INDEX = "req_hnsw_idx"
 PROCEDURE_INDEX = "procedure_idx"
+CUSTOMER_INDEX = "customer_idx"
 CACHE_NAME = "req_search_cache"
 CACHE_DISTANCE_THRESHOLD = 0.15
 SOP_INDEX = "sop_idx"
 ROUTER_NAME = "intent_router"
+TIN_BLOOM = "tin_seen"
 
 
 def connect():
@@ -133,12 +144,38 @@ def _sop_schema():
     })
 
 
+# FT.CREATE customer_idx ON HASH PREFIX customer: SCHEMA ... embedding
+# VECTOR FLAT ... — the fuzzy-match half of duplicate-identity
+# detection. `embedding` is over the customer's NAME ONLY, not blended
+# with city/state — measured directly (see docs/METHODOLOGY.md) that
+# blending city into the text made the false-positive problem worse,
+# not better, since two unrelated same-last-name people sharing a city
+# token pulled their vectors closer together on top of already sharing
+# a last-name token. `city` is filtered on separately as an exact TAG
+# match in check_duplicate() instead — hybrid filtering again, same
+# pattern as the procedure/SOP semantic search, applied here to narrow
+# candidates before ranking rather than to narrow results after.
+def _customer_schema():
+    return IndexSchema.from_dict({
+        "index": {"name": CUSTOMER_INDEX, "prefix": "customer:", "storage_type": "hash"},
+        "fields": [
+            {"name": "customer_id", "type": "tag"},
+            {"name": "name", "type": "text"},
+            {"name": "city", "type": "tag"},
+            {"name": "state", "type": "tag"},
+            {"name": "tin", "type": "tag"},
+            _vector_field("flat"),
+        ],
+    })
+
+
 def get_index(client, index_name):
     schema = {
         REQ_FLAT_INDEX: _req_schema(REQ_FLAT_INDEX, "flat"),
         REQ_HNSW_INDEX: _req_schema(REQ_HNSW_INDEX, "hnsw"),
         PROCEDURE_INDEX: _procedure_schema(),
         SOP_INDEX: _sop_schema(),
+        CUSTOMER_INDEX: _customer_schema(),
     }[index_name]
     return SearchIndex(schema=schema, redis_client=client)
 
@@ -146,7 +183,7 @@ def get_index(client, index_name):
 def create_indexes(client):
     # req_hnsw_idx is deliberately NOT created here — see create_hnsw_index()
     # below for why.
-    for name in (REQ_FLAT_INDEX, PROCEDURE_INDEX, SOP_INDEX):
+    for name in (REQ_FLAT_INDEX, PROCEDURE_INDEX, SOP_INDEX, CUSTOMER_INDEX):
         get_index(client, name).create(overwrite=True, drop=True)
 
 
@@ -232,6 +269,22 @@ def load_sops(client, rows):
         for r in rows
     ]
     idx.load(data, id_field="sop_id")
+
+
+def load_customers(client, rows):
+    idx = get_index(client, CUSTOMER_INDEX)
+    data = [
+        {
+            "customer_id": r["customer_id"],
+            "name": r["name"],
+            "city": r["city"],
+            "state": r["state"],
+            "tin": r["tin"],
+            "embedding": vector_to_bytes(r["embedding"]),
+        }
+        for r in rows
+    ]
+    idx.load(data, id_field="customer_id")
 
 
 def _run_vector_query(client, index_name, query_vector, limit, filter_expression=None, return_fields=None):
@@ -416,9 +469,94 @@ def cached_request_search(cache, client, query_text=None, limit=8, vector=None):
     return rows, ms, False, f"CACHE MISS — computed via {query_str}, stored for next time"
 
 
+def tin_exact_key(tin):
+    return f"tin:{tin}"
+
+
+# BF.RESERVE tin_seen 0.01 6000 — a Bloom filter over every TIN in the
+# customer base. O(1) and a fraction of a Set's memory, at the cost of
+# a small, known false-positive rate — but never a false negative:
+# BF.ADD guarantees a BF.EXISTS "no" is always correct, so a miss can
+# skip the exact check entirely with zero risk. A "maybe" still needs
+# confirming against the real tin:<tin> Set below, since it might be
+# one of the false positives BF.RESERVE's error rate allows for.
+def build_tin_bloom(client, tins):
+    client.delete(TIN_BLOOM)
+    client.execute_command("BF.RESERVE", TIN_BLOOM, TIN_BLOOM_ERROR_RATE, TIN_BLOOM_CAPACITY)
+    for i in range(0, len(tins), 1000):
+        client.execute_command("BF.MADD", TIN_BLOOM, *tins[i : i + 1000])
+
+
+def load_tin_index(client, rows):
+    pipe = client.pipeline(transaction=False)
+    for r in rows:
+        pipe.sadd(tin_exact_key(r["tin"]), r["customer_id"])
+    pipe.execute()
+
+
+# The duplicate-detection scenario: two independent signals, neither of
+# which is a RedisVL search.
+#
+#   1. BF.EXISTS tin_seen <tin> — O(1). A "no" is a hard guarantee of
+#      no existing customer with this exact TIN, decided without ever
+#      touching the real per-TIN data.
+#   2. On a "maybe", SMEMBERS tin:<tin> confirms it for real — this is
+#      also where a Bloom false positive would get caught
+#      (maybe_seen=True, exact_matches=[]).
+#   3. Independent of both: a fuzzy FT.SEARCH KNN over customer_idx on
+#      "<name>, <city>, <state>" catches near-duplicate profiles that
+#      don't share an exact TIN at all — a middle initial, a suffix,
+#      the same person entered twice under slightly different details.
+def check_duplicate(client, name, city, state, tin):
+    t0 = time.perf_counter()
+    maybe_seen = bool(client.execute_command("BF.EXISTS", TIN_BLOOM, tin))
+    bloom_ms = (time.perf_counter() - t0) * 1000
+
+    exact_matches, exact_ms = [], None
+    if maybe_seen:
+        t1 = time.perf_counter()
+        members = client.smembers(tin_exact_key(tin))
+        exact_ms = (time.perf_counter() - t1) * 1000
+        exact_matches = sorted(m.decode() for m in members)
+
+    vec = embed(name)
+    fuzzy_rows, fuzzy_ms, _ = _run_vector_query(
+        client, CUSTOMER_INDEX, vec, limit=3, filter_expression=Tag("city") == city,
+        return_fields=["customer_id", "name", "city", "state", "tin"],
+    )
+    # `score` from _run_vector_query is similarity (1 - distance/2);
+    # convert back to cosine distance to compare against the same
+    # threshold generate.py's near_duplicate_name() was tuned against.
+    for row in fuzzy_rows:
+        row["near_duplicate"] = (2 * (1 - row["score"])) <= NEAR_DUPLICATE_DISTANCE_THRESHOLD
+
+    return {
+        "maybe_seen": maybe_seen,
+        "bloom_ms": bloom_ms,
+        "exact_matches": exact_matches,
+        "exact_ms": exact_ms,
+        "false_positive": maybe_seen and not exact_matches,
+        "fuzzy_matches": fuzzy_rows,
+        "fuzzy_ms": fuzzy_ms,
+    }
+
+
+def _bloom_info(client, name):
+    try:
+        raw = client.execute_command("BF.INFO", name)
+    except redis.exceptions.ResponseError:
+        return None
+    pairs = dict(zip((_decode(x) for x in raw[::2]), (_decode(x) for x in raw[1::2])))
+    return {
+        "capacity": pairs.get("Capacity"),
+        "size_bytes": pairs.get("Size"),
+        "items_inserted": pairs.get("Number of items inserted"),
+    }
+
+
 def architecture_info(client):
     info = {}
-    for name in (REQ_FLAT_INDEX, REQ_HNSW_INDEX, PROCEDURE_INDEX, SOP_INDEX, ROUTER_NAME, CACHE_NAME):
+    for name in (REQ_FLAT_INDEX, REQ_HNSW_INDEX, PROCEDURE_INDEX, SOP_INDEX, CUSTOMER_INDEX, ROUTER_NAME, CACHE_NAME):
         try:
             raw = client.ft(name).info()
             info[name] = {
@@ -427,6 +565,7 @@ def architecture_info(client):
             }
         except redis.exceptions.ResponseError:
             info[name] = None
+    info[TIN_BLOOM] = _bloom_info(client, TIN_BLOOM)
     info["db_size"] = client.dbsize()
     return info
 

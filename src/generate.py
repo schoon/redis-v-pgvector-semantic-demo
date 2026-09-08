@@ -18,7 +18,11 @@ import json
 import os
 import random
 
-from config import CUSTOMERS, DATA_DIR, DATA_FILES, PROCEDURES, REQUESTS, SEED, SOP_ARTICLES
+from config import (
+    CLEAN_EXAMPLE_COUNT, CUSTOMERS, DATA_DIR, DATA_FILES, DUPLICATE_TIN_COUNT,
+    EXACT_DUP_EXAMPLE_COUNT, NEAR_DUPLICATE_COUNT, PROCEDURES, REQUESTS, SEED,
+    SOP_ARTICLES,
+)
 
 rng = random.Random(SEED)
 
@@ -34,16 +38,37 @@ CITIES = [
     ("Salt Lake City", "UT"), ("San Diego", "CA"), ("Columbus", "OH"), ("Indianapolis", "IN"),
 ]
 
+# Both pools are deliberately larger than a first pass used (34/24) —
+# that size let a 5,000-person corpus with only 20 cities average ~10
+# people sharing any given (last name, city) pair, which meant the
+# duplicate-detection demo's fuzzy layer was flagging plenty of
+# unrelated same-last-name namesakes as "possible duplicates" (measured
+# directly: "Robert Smith" vs. "Daniel Smith," same city, landed at
+# cosine distance 0.099 — well inside the near-duplicate threshold,
+# despite being two different people). Wider pools cut that average
+# down to ~3-4 people per bucket — see docs/METHODOLOGY.md for the full
+# measurement and the other two changes (name-only embedding, city as a
+# hard filter) that came out of the same investigation.
 FIRST_NAMES = [
     "James", "Mary", "Robert", "Patricia", "John", "Linda", "Michael", "Barbara",
     "David", "Elizabeth", "William", "Jennifer", "Richard", "Susan", "Joseph", "Jessica",
     "Thomas", "Karen", "Charles", "Nancy", "Daniel", "Lisa", "Matthew", "Betty", "Anthony",
     "Sandra", "Mark", "Ashley", "Donald", "Kimberly", "Steven", "Emily", "Paul", "Donna",
+    "Christopher", "Amanda", "Andrew", "Melissa", "Joshua", "Deborah", "Kenneth", "Stephanie",
+    "Kevin", "Rebecca", "Brian", "Sharon", "George", "Laura", "Edward", "Cynthia", "Ronald",
+    "Amy", "Timothy", "Angela", "Jason", "Helen", "Jeffrey", "Anna", "Ryan", "Brenda",
+    "Jacob", "Pamela", "Gary", "Nicole", "Nicholas", "Samantha", "Eric", "Katherine",
 ]
 LAST_NAMES = [
     "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
     "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson",
     "Thomas", "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson", "White",
+    "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson", "Walker", "Young",
+    "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores", "Green",
+    "Adams", "Nelson", "Baker", "Hall", "Rivera", "Campbell", "Mitchell", "Carter",
+    "Roberts", "Gomez", "Phillips", "Evans", "Turner", "Diaz", "Parker", "Cruz",
+    "Edwards", "Collins", "Reyes", "Stewart", "Morris", "Morales", "Murphy", "Cook",
+    "Rogers", "Gutierrez", "Ortiz", "Morgan", "Cooper",
 ]
 
 # Each request type carries its own intake-channel pool and a handful of
@@ -242,6 +267,28 @@ def rand_date(start_days_ago, end_days_ago):
     return (TODAY - datetime.timedelta(days=day_offset)).isoformat()
 
 
+def rand_tin():
+    return f"{rng.randint(100, 999)}-{rng.randint(10, 99)}-{rng.randint(1000, 9999)}"
+
+
+# Only two transforms are used here, chosen after measuring several
+# candidates directly against embeddings.embed() rather than guessing
+# (see docs/METHODOLOGY.md for the full numbers). A nickname swap and a
+# first-initial-only rendering both measured too close to a genuinely
+# unrelated same-last-name-same-city namesake to trust, and are
+# deliberately NOT used. A middle initial or a suffix measure
+# reliably closer to the true source than most (not all — see
+# NEAR_DUPLICATE_DISTANCE_THRESHOLD in config.py for the honest,
+# measured overlap in the tail) unrelated namesakes.
+def near_duplicate_name(name):
+    first, last = name.split(" ", 1)
+    variants = [
+        f"{first} {rng_pick('ABCDEFGHIJKLMNOPQRSTUVWXYZ')} {last}",  # middle initial
+        f"{first} {last} Jr",  # suffix
+    ]
+    return rng_pick(variants)
+
+
 def generate_customers():
     customers = []
     for i in range(CUSTOMERS):
@@ -252,8 +299,83 @@ def generate_customers():
             "city": city,
             "state": state,
             "join_date": rand_date(1400, 30),
+            "tin": rand_tin(),
         })
+
+    # Seed a realistic slice of genuine duplicate-TIN records -- two
+    # unrelated people whose TIN was entered incorrectly and now
+    # collides -- exactly the data-quality problem this team resolves,
+    # so the duplicate-detection demo has real matches to find rather
+    # than uniformly clean data. These stay in customers.jsonl and get
+    # loaded into Redis like any other customer.
+    for cust in rng.sample(customers, DUPLICATE_TIN_COUNT):
+        donor = rng_pick(customers)
+        cust["tin"] = donor["tin"]
+
     return customers
+
+
+# Held-out test submissions for the duplicate-detection demo -- NOT
+# loaded into customer_idx. A near-duplicate example that's already
+# sitting in the index would just find itself at a trivial 100% match;
+# the actual scenario being demonstrated is "a brand new submission
+# comes in — does it get flagged against the EXISTING customer base,"
+# so these have to stay outside that base.
+def generate_duplicate_check_examples(customers):
+    existing_tins = {c["tin"] for c in customers}
+
+    def fresh_tin():
+        tin = rand_tin()
+        while tin in existing_tins:
+            tin = rand_tin()
+        existing_tins.add(tin)
+        return tin
+
+    examples = []
+
+    # Clean: a genuinely new person, unrelated to anyone on file.
+    for _ in range(CLEAN_EXAMPLE_COUNT):
+        city, state = rng_pick(CITIES)
+        examples.append({
+            "kind": "clean",
+            "name": f"{rng_pick(FIRST_NAMES)} {rng_pick(LAST_NAMES)}",
+            "city": city, "state": state,
+            "tin": fresh_tin(),
+            "near_duplicate_of": None,
+        })
+
+    # Exact duplicate: reuses a TIN that's already on file under a
+    # different name -- caught by the Bloom filter + exact TIN index,
+    # not the fuzzy layer.
+    tin_counts = {}
+    for c in customers:
+        tin_counts[c["tin"]] = tin_counts.get(c["tin"], 0) + 1
+    seeded_dup_tins = [t for t, n in tin_counts.items() if n > 1]
+    for tin in rng.sample(seeded_dup_tins, min(EXACT_DUP_EXAMPLE_COUNT, len(seeded_dup_tins))):
+        city, state = rng_pick(CITIES)
+        examples.append({
+            "kind": "exact_duplicate",
+            "name": f"{rng_pick(FIRST_NAMES)} {rng_pick(LAST_NAMES)}",
+            "city": city, "state": state,
+            "tin": tin,
+            "near_duplicate_of": None,
+        })
+
+    # Near duplicate: the same person as an existing customer, entered
+    # again under a slightly different name at the same address, with a
+    # brand new TIN -- no exact match at all, only the fuzzy vector
+    # layer catches this one.
+    for src in rng.sample(customers, NEAR_DUPLICATE_COUNT):
+        examples.append({
+            "kind": "near_duplicate",
+            "name": near_duplicate_name(src["name"]),
+            "city": src["city"], "state": src["state"],
+            "tin": fresh_tin(),
+            "near_duplicate_of": src["customer_id"],
+        })
+
+    rng.shuffle(examples)
+    return examples
 
 
 def generate_procedures():
@@ -316,6 +438,12 @@ def main():
     customers = generate_customers()
     write_jsonl(DATA_FILES["customers"], customers)
     print(f"  {len(customers):,} customers")
+
+    print("Generating duplicate-check test examples...")
+    dup_examples = generate_duplicate_check_examples(customers)
+    write_jsonl(DATA_FILES["duplicate_check_examples"], dup_examples)
+    print(f"  {len(dup_examples):,} examples "
+          f"({CLEAN_EXAMPLE_COUNT} clean, {EXACT_DUP_EXAMPLE_COUNT} exact-duplicate, {NEAR_DUPLICATE_COUNT} near-duplicate)")
 
     print("Generating procedure catalog...")
     procedures = generate_procedures()

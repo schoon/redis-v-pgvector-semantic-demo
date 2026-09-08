@@ -2,8 +2,10 @@
 
 Read this before presenting. It covers what's fictitious, two real HNSW
 bugs found while building this (both fixed), a real timing bug that
-made routing look far slower than it actually is, and what this demo
-does not support.
+made routing look far slower than it actually is, a real precision
+problem in duplicate detection found by measuring the actual corpus
+(fixed, though not to 100%/0% — the honest result is disclosed, not
+chased), and what this demo does not support.
 
 ## No real customer data anywhere
 
@@ -29,13 +31,17 @@ Embedding all 300,000 rows works fine locally too, but a sample is
 enough to show the search behavior honestly and keeps `seed_redis.py`
 fast to re-run. `REQUEST_EMBED_SAMPLE` in `config.py` controls this.
 
-**Customer data is generated but not loaded into Redis.** None of the
-scenarios (vector search, semantic search, semantic routing, caching,
-throughput) filter by customer — they're all "search within the whole
-corpus," not "search within what one customer can see." `customers.jsonl`
-exists so the corpus reads as a real bank's data shape, but there's
-nothing here that joins against it right now. See "What this demo does
-not support" below.
+**Customer data is loaded into Redis — the one exception to "whole
+corpus, not scoped to one customer."** Every other scenario (vector
+search, semantic search, semantic routing, caching, throughput)
+searches the whole corpus, deliberately not filtered by customer. The
+duplicate-detection scenario is different by necessity: "does this new
+submission match something already in the customer base" is
+meaningless without the base actually loaded, so `customer_idx` holds
+all 5,000 customers, and `tin_seen`/`tin:<tin>` cover every TIN among
+them. See "Duplicate-identity detection" below, and "What this demo
+does not support" for what's still out of scope (per-customer
+entitlement scoping on the OTHER scenarios, which this doesn't change).
 
 ## Two real bugs, both about HNSW, both fixed
 
@@ -192,6 +198,99 @@ anything about.
 first**, so call 1 is a genuine miss every time it's run, not a hit
 left over from an earlier demo run or another visitor's request.
 
+## Duplicate-identity detection: a Bloom filter, a fuzzy vector match, and a real precision problem found (and fixed) by measuring instead of assuming
+
+This scenario runs two independent Redis primitives against the
+customer base, neither of which is a RedisVL search:
+
+1. **`BF.EXISTS tin_seen <tin>`** — a RedisBloom filter over every
+   customer's TIN. O(1), and a Bloom filter can never false-negative by
+   construction: a "no" is a hard guarantee that no existing customer
+   has this exact TIN, decided without touching the real per-TIN data
+   at all.
+2. On a "maybe," **`SMEMBERS tin:<tin>`** confirms it for real — also
+   where a Bloom false positive gets caught (`maybe_seen=True`,
+   `exact_matches=[]`, expected at roughly the filter's configured
+   error rate, `TIN_BLOOM_ERROR_RATE = 0.01` in `config.py`).
+3. Independently of both: **`FT.SEARCH customer_idx "(@city:{...})=>[KNN
+   3 @embedding $vec]"`** — a fuzzy vector match on name, filtered to
+   the same city, for near-duplicates that share no exact TIN at all: a
+   middle initial, a suffix, the same person entered twice.
+
+### A real precision problem, found by measuring the actual corpus, not a couple of hand-picked examples
+
+The first version of this scenario embedded `"<name>, <city>, <state>"`
+as one blended string, with a nickname or a first-initial-only
+transform among the near-duplicate examples, and a threshold picked
+from a handful of manually-typed test pairs. Every one of those choices
+turned out to be wrong once measured against the real generated corpus
+rather than a few examples typed by hand:
+
+**Finding 1: blending city into the embedded text made false positives
+*worse*, not better.** The intuition was that sharing a city would help
+confirm two records are the same person. Measured directly: `"Robert
+Smith, Charlotte, NC"` vs. `"Daniel Smith, Charlotte, NC"` — two
+different, unrelated people who just happen to share a last name and a
+city — landed at cosine distance **0.099**, comfortably inside the
+original 0.2 near-duplicate threshold. Sharing a city token on top of
+an already-shared last-name token pulled the two vectors closer
+together, compounding the false signal instead of correcting it.
+Dropping city from the embedded text and checking name-only widened
+that same pair's distance to 0.183 — real, but not enough on its own.
+
+**Finding 2: a first-initial-only transform (e.g. "Jessica Williams" →
+"J. Williams") was worse than useless.** It measured *closer* to
+unrelated same-last-name namesakes (0.07–0.11) than to the true source
+it was supposed to represent (0.27). A nickname swap (e.g. "Elizabeth"
+→ "Liz") wasn't much better once tested against the right adversarial
+case — 0.06 margin between "true source" and "unrelated namesake,"
+too thin to trust. Neither is used; `generate.py`'s
+`near_duplicate_name()` only uses a middle initial or a suffix, which
+measured a much wider margin against the same adversarial case.
+
+**Finding 3: the original 34-first-name/24-last-name pool was too
+small for a 5,000-person corpus.** With only 20 cities, that pool put
+an average of ~10 people in every (last name, city) bucket — a dense
+population of coincidental namesakes for the fuzzy layer to
+misidentify. Widened to ~67 first names and ~70 last names, cutting the
+average bucket down to ~3.6 people.
+
+**Finding 4, the honest one: even after all three fixes, the true-
+positive and false-positive distributions still overlap in the tail.**
+An exhaustive sweep of every real same-last-name-same-city pair in the
+generated corpus (8,709 pairs, name-only embedding, city already
+matched by construction) found a worst-case adversarial distance of
+**0.088** — below some of the seeded near-duplicate examples' own
+distance to their true source (measured across all 50: median 0.068,
+worst case 0.138). There is no single threshold that gets both
+distributions to 100% recall and 0% false positives; they genuinely
+overlap. `NEAR_DUPLICATE_DISTANCE_THRESHOLD = 0.12` in `config.py` is a
+deliberate, measured tradeoff — 49 of 50 (98%) seeded near-duplicates
+correctly flagged, at a 0.56% false-positive rate (49 of 8,709) against
+every real same-last-name-same-city namesake in the corpus. Raising the
+threshold to 0.14 catches all 50 but roughly triples the false-positive
+rate to 1.7% — a worse tradeoff, not a better one.
+
+This is disclosed rather than hidden because it's a genuine property of
+matching short name strings with a general-purpose sentence embedding
+model, not a bug specific to this demo. It's also why the UI calls a
+fuzzy hit "possible duplicate profile — review recommended," never
+"confirmed" — unlike the Bloom/exact-TIN path, which really is a hard
+guarantee once `SMEMBERS` confirms it.
+
+### Held-out test data, not customers loaded into the index
+
+`generate.py`'s `generate_duplicate_check_examples()` produces 70
+test submissions (10 clean, 10 exact-duplicate, 50 near-duplicate) into
+`data/duplicate_check_examples.jsonl` — served to the UI via
+`/api/duplicate-examples` for "Try an example," and read directly by
+`validate.py`. None of these are loaded into `customer_idx`. A
+near-duplicate example that was already sitting in the index would
+just find itself at a trivial 100% match; the actual scenario being
+demonstrated is "a brand new submission comes in — does it get flagged
+against the EXISTING customer base," which only makes sense if the
+example stays outside that base.
+
 ## How timing works
 
 Every search endpoint in `server.py` runs the query `runs` times
@@ -253,7 +352,12 @@ median is harder to accidentally cherry-pick than "best of N."
 
 `src/generate.py` runs off a fixed seed (`SEED` in `config.py`), so the
 corpus is reproducible run to run — but changing `REQUEST_TYPES`,
-`PROCEDURE_CATALOG`, `SOP_CATALOG`, or the scale constants will change
-the generated data, which will change measured latencies. Re-run
-`validate.py` and `bench.py` after any such change, and update the
-README's numbers rather than leaving stale ones in place.
+`PROCEDURE_CATALOG`, `SOP_CATALOG`, `FIRST_NAMES`/`LAST_NAMES`, or the
+scale constants will change the generated data, which will change
+measured latencies — and, for the name pools specifically, can change
+the duplicate-detection false-positive rate (see "Duplicate-identity
+detection" above; shrinking either pool means re-running the exhaustive
+same-last-name-same-city sweep before trusting
+`NEAR_DUPLICATE_DISTANCE_THRESHOLD` again). Re-run `validate.py` and
+`bench.py` after any such change, and update the README's numbers
+rather than leaving stale ones in place.
