@@ -1,0 +1,22 @@
+services:
+  redis:
+    image: redis:8
+    container_name: rvpv-redis
+    ports:
+      - "6384:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rvpv-postgres
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demopassword
+      POSTGRES_DB: semanticdemo
+    ports:
+      - "5433:5432"
+    # No parallelism/planner flags disabled here on purpose — Postgres runs
+    # with its normal defaults (just a larger shared_buffers, which any real
+    # deployment would also set). Crippling the competitor to make a point
+    # is not the kind of "fair fight" this demo is for.
+    command: ["postgres", "-c", "shared_buffers=1GB", "-c", "effective_cache_size=3GB"]

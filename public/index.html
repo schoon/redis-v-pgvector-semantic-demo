@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Redis vs pgvector — Semantic Search &amp; Routing</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0d0f13; --panel: #151821; --panel-2: #1b1f2a; --line: #262b38;
+    --text: #e7e9ee; --muted: #8b93a3; --good: #35c46b; --bad: #e5484d;
+    --redis: #dc382c; --postgres: #336791;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.5rem 4rem; }
+  a { color: #7db8ff; }
+  header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.5rem; }
+  header h1 { font-size: 1.15rem; margin: 0; font-weight: 650; }
+  header .tag-pill { font-size: 0.68rem; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0.15rem 0.6rem; }
+  button.ghost { padding: 0.4rem 0.8rem; font-size: 0.8rem; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; font-family: inherit; }
+  button.ghost:hover { background: var(--panel-2); }
+
+  /* Landing */
+  .landing { max-width: 760px; margin: 4rem auto; text-align: center; }
+  .landing h1 { font-size: 2.1rem; margin: 0 0 0.6rem; }
+  .landing p { color: var(--muted); font-size: 1.02rem; line-height: 1.55; }
+  .landing .cta { margin-top: 1.8rem; }
+  .landing .cta button { font-size: 1rem; padding: 0.8rem 1.8rem; border-radius: 10px; border: none; background: var(--redis); color: white; font-weight: 600; cursor: pointer; }
+  .landing .cta button:hover { opacity: 0.92; }
+  .landing .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.9rem; margin: 2.2rem 0; text-align: left; }
+  .landing .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem 1rem; }
+  .landing .card h3 { font-size: 0.85rem; margin: 0 0 0.4rem; }
+  .landing .card p { font-size: 0.8rem; margin: 0; }
+  html.demo .landing { display: none; }
+  html:not(.demo) .demo-app { display: none; }
+
+  .scenarios { display: flex; gap: 0.4rem; margin: 1.1rem 0 0.75rem; flex-wrap: wrap; }
+  .scenarios button { background: var(--panel); color: var(--muted); border: 1px solid var(--line); padding: 0.45rem 0.85rem; border-radius: 999px; cursor: pointer; font-size: 0.85rem; font-family: inherit; }
+  .scenarios button:hover { color: var(--text); }
+  .scenarios button.active { background: var(--panel-2); color: var(--text); border-color: #3d4450; }
+  .hint { color: var(--muted); font-size: 0.8rem; margin: 0 0 0.9rem; min-height: 1.2rem; }
+
+  .controls { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+  input[type="text"], input[type="number"], select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 0.6rem 0.75rem; font-size: 0.95rem; font-family: inherit; }
+  input[type="text"] { flex: 1; min-width: 14rem; }
+  input:focus, select:focus { outline: 1px solid #4a5262; }
+  select option { background-color: var(--panel-2); color: var(--text); }
+  label.inline { color: var(--muted); font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; }
+  .filters { display: none; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.6rem; align-items: center; }
+  .filters.show { display: flex; }
+
+  .summary { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: center; margin: 1.4rem 0 0.5rem; }
+  .summary[hidden] { display: none; }
+  .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem 1rem; }
+  .metric .engine { font-size: 0.7rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
+  .metric .time { font-size: 1.9rem; font-weight: 680; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .metric .sub { font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .metric.redis { border-left: 3px solid var(--redis); }
+  .metric.postgres { border-left: 3px solid var(--postgres); }
+  .verdict { text-align: center; }
+  .verdict .x { font-size: 1.6rem; font-weight: 700; color: var(--good); font-variant-numeric: tabular-nums; }
+  .verdict .lbl { font-size: 0.66rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .verdict.warn .x { color: #d8a02a; font-size: 0.95rem; }
+
+  .bars { margin: 0.25rem 0 1.25rem; }
+  .bar-row { display: grid; grid-template-columns: 4.5rem 1fr 5.5rem; gap: 0.6rem; align-items: center; margin: 0.3rem 0; }
+  .bar-row .name { font-size: 0.75rem; color: var(--muted); }
+  .bar-track { background: var(--panel); border-radius: 4px; height: 0.85rem; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.18s ease; }
+  .bar-fill.redis { background: var(--redis); }
+  .bar-fill.postgres { background: var(--postgres); }
+  .bar-row .val { font-size: 0.78rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .panes[hidden] { display: none; }
+  @media (max-width: 860px) { .panes { grid-template-columns: 1fr; } .summary { grid-template-columns: 1fr; } .landing .grid3 { grid-template-columns: 1fr; } }
+  .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .pane h2 { margin: 0; padding: 0.7rem 0.9rem; font-size: 0.85rem; font-weight: 600; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+  .pane.redis h2 { color: var(--redis); }
+  .pane.postgres h2 { color: var(--postgres); }
+  .pane h2 .count { color: var(--muted); font-size: 0.75rem; font-weight: 400; font-variant-numeric: tabular-nums; }
+  .q { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.66rem; color: var(--muted); padding: 0.55rem 0.9rem; border-bottom: 1px solid var(--line); word-break: break-all; background: #0f1116; min-height: 3rem; max-height: 6rem; overflow-y: auto; white-space: pre-wrap; }
+  .empty { padding: 1.2rem 0.9rem; color: var(--muted); font-style: italic; text-align: center; font-size: 0.85rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.76rem; }
+  th { text-align: left; padding: 0.4rem 0.9rem; color: var(--muted); font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
+  td { padding: 0.4rem 0.9rem; border-top: 1px solid var(--line); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .rowbody { max-height: 360px; overflow-y: auto; }
+
+  .route-card { padding: 1rem; }
+  .route-card .name { font-size: 1.05rem; font-weight: 700; }
+  .route-card .desc { font-size: 0.82rem; color: var(--muted); margin-top: 0.3rem; }
+  .route-card .action { font-size: 0.8rem; margin-top: 0.6rem; padding: 0.55rem 0.7rem; background: var(--panel-2); border-radius: 8px; }
+  .route-card .dist { font-size: 0.72rem; color: var(--muted); margin-top: 0.5rem; font-variant-numeric: tabular-nums; }
+  .route-card.no-match .name { color: var(--muted); font-style: italic; }
+
+  .note { margin-top: 1.5rem; padding: 0.85rem 1rem; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid #4a5262; border-radius: 8px; font-size: 0.78rem; color: var(--muted); }
+  .note b { color: var(--text); font-weight: 600; }
+  .note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #0f1116; padding: 0.05rem 0.3rem; border-radius: 3px; }
+
+  .progress { height: 2px; background: transparent; border-radius: 2px; margin: 0.5rem 0 0; overflow: hidden; }
+  body.loading .progress { background: var(--line); }
+  body.loading .progress::after { content: ''; display: block; height: 100%; width: 35%; background: var(--redis); animation: slide 0.9s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+  body.loading .summary, body.loading .bars { opacity: 0.4; }
+  .summary, .bars { transition: opacity 0.12s ease; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="landing">
+    <span class="tag-pill">redis vs pgvector</span>
+    <h1>Semantic Search &amp; Routing</h1>
+    <p>
+      Side-by-side vector search, hybrid semantic search, and semantic
+      intent routing — <b>Redis (RedisVL)</b> vs <b>Postgres (pgvector)</b> —
+      over a fictitious credit-card company's transactions, card products,
+      and support FAQ. Same corpus, same embeddings, same questions.
+    </p>
+    <div class="grid3">
+      <div class="card"><h3>Vector search</h3><p>Exact (FLAT/KNN) and approximate (HNSW) nearest-neighbor search over 40,000 embedded transactions.</p></div>
+      <div class="card"><h3>Semantic search</h3><p>Natural-language search over card products and FAQ articles, combined with category/fee filters in one query.</p></div>
+      <div class="card"><h3>Semantic routing</h3><p>RedisVL's built-in SemanticRouter vs a hand-rolled pgvector equivalent, classifying customer questions into support intents.</p></div>
+    </div>
+    <div class="cta"><button id="enterDemo">Enter demo →</button></div>
+    <p style="font-size:0.75rem; margin-top:2rem;">No real customer or transaction data of any kind. See <a href="https://github.com/schoon/redis-v-pgvector-semantic-demo/blob/main/docs/METHODOLOGY.md">Methodology</a>.</p>
+  </div>
+
+  <div class="demo-app">
+    <header>
+      <h1>Redis vs pgvector — Semantic Search &amp; Routing</h1>
+      <button class="ghost" id="backToOverview">← Overview</button>
+    </header>
+
+    <div class="scenarios" id="scenarios">
+      <button data-s="flat">Vector search — exact (FLAT/KNN)</button>
+      <button data-s="hnsw">Vector search — approximate (HNSW)</button>
+      <button data-s="semantic">Semantic search</button>
+      <button data-s="route">Semantic routing</button>
+      <button data-s="throughput">Throughput</button>
+      <button data-s="architecture">Architecture</button>
+    </div>
+    <div class="hint" id="hint"></div>
+
+    <div class="controls" id="controls">
+      <input type="text" id="q" placeholder="Query...">
+      <button class="ghost" id="randomQuery">Try an example</button>
+      <label class="inline">runs <select id="runs"><option>1</option><option selected>3</option><option>5</option></select></label>
+    </div>
+
+    <div class="filters" id="semanticFilters">
+      <label class="inline">corpus
+        <select id="semCorpus">
+          <option value="products">Card products</option>
+          <option value="faq">FAQ articles</option>
+        </select>
+      </label>
+      <label class="inline">category <select id="semCategory"><option value="">any</option></select></label>
+      <label class="inline">max annual fee <input type="number" id="semMaxFee" style="width:6rem" placeholder="any"></label>
+    </div>
+
+    <div class="progress" id="progress"></div>
+
+    <div class="summary" id="summary" hidden>
+      <div class="metric redis">
+        <div class="engine">Redis</div>
+        <div class="time" id="rt">—</div>
+        <div class="sub" id="rsub">&nbsp;</div>
+      </div>
+      <div class="verdict" id="verdict">
+        <div class="x" id="vx">—</div>
+        <div class="lbl" id="vlbl">faster</div>
+      </div>
+      <div class="metric postgres">
+        <div class="engine">Postgres</div>
+        <div class="time" id="ot">—</div>
+        <div class="sub" id="osub">&nbsp;</div>
+      </div>
+    </div>
+
+    <div class="bars" id="bars"></div>
+
+    <div class="panes" id="panes">
+      <div class="pane redis">
+        <h2>Redis <span class="count" id="rcount"></span></h2>
+        <div class="q" id="rq"></div>
+        <div class="rowbody" id="rbody"></div>
+      </div>
+      <div class="pane postgres">
+        <h2>Postgres <span class="count" id="ocount"></span></h2>
+        <div class="q" id="oq"></div>
+        <div class="rowbody" id="obody"></div>
+      </div>
+    </div>
+
+    <div class="note" id="method"></div>
+  </div>
+</div>
+
+<script>
+  const el = (id) => document.getElementById(id);
+  let scenario = 'flat';
+  let inflight = 0;
+  let routesCache = null;
+
+  function showDemo(on) {
+    document.documentElement.classList.toggle('demo', on);
+    if (on) { loadDropdowns(); setScenario(scenario); }
+  }
+  el('enterDemo').addEventListener('click', () => showDemo(true));
+  el('backToOverview').addEventListener('click', () => showDemo(false));
+
+  const SCENARIOS = {
+    flat: { hint: 'Exact (FLAT/KNN) nearest-neighbor search over 40,000 embedded transaction descriptions — every candidate compared, no approximation.' },
+    hnsw: { hint: 'Approximate (HNSW) nearest-neighbor search — same transactions, same query, a graph index instead of brute force.' },
+    semantic: { hint: 'Semantic search with metadata filters, in one query — not vector search followed by a separate filter step.', filters: true },
+    route: { hint: 'Classify a customer question into a support intent — RedisVL\'s built-in SemanticRouter vs a hand-rolled pgvector equivalent.', noRuns: true },
+    throughput: { hint: 'Concurrent entitlement-style vector search QPS, run npm run bench equivalent (see README).', noControls: true },
+    architecture: { hint: 'Live schema introspection for both engines.', noControls: true },
+  };
+
+  const EXAMPLES = {
+    flat: ['coffee shop purchases', 'hotel stays', 'airline ticket charges', 'monthly streaming subscription', 'gas station fill-up'],
+    hnsw: ['coffee shop purchases', 'hotel stays', 'airline ticket charges', 'monthly streaming subscription', 'gas station fill-up'],
+    semantic: ['card with no annual fee and travel rewards', 'best card for grocery spending', 'how do I dispute a charge', 'foreign transaction fee'],
+  };
+
+  function setScenario(next) {
+    scenario = next;
+    for (const b of el('scenarios').children) b.classList.toggle('active', b.dataset.s === next);
+    const cfg = SCENARIOS[next];
+    el('hint').textContent = cfg.hint;
+    el('controls').style.display = cfg.noControls ? 'none' : '';
+    el('runs').closest('label').style.display = cfg.noRuns ? 'none' : '';
+    el('semanticFilters').classList.toggle('show', Boolean(cfg.filters));
+    el('summary').hidden = false;
+    el('panes').hidden = false;
+    if (next === 'route') {
+      el('q').placeholder = 'Ask a customer-service question...';
+    } else if (next === 'semantic') {
+      el('q').placeholder = 'Describe what you\'re looking for...';
+    } else {
+      el('q').placeholder = 'Describe a kind of transaction...';
+    }
+    search();
+  }
+  el('scenarios').addEventListener('click', (e) => { if (e.target.dataset.s) setScenario(e.target.dataset.s); });
+
+  el('randomQuery').addEventListener('click', async () => {
+    if (scenario === 'route') {
+      if (!routesCache) routesCache = await (await fetch('/api/routes')).json();
+      el('q').value = routesCache[Math.floor(Math.random() * routesCache.length)].sample;
+    } else {
+      const pool = EXAMPLES[scenario] || EXAMPLES.flat;
+      el('q').value = pool[Math.floor(Math.random() * pool.length)];
+    }
+    search();
+  });
+  el('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+  el('runs').addEventListener('change', search);
+  el('semCorpus').addEventListener('change', search);
+  el('semCategory').addEventListener('change', search);
+  el('semMaxFee').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+
+  async function loadDropdowns() {
+    const products = await (await fetch('/api/architecture')).json().catch(() => null);
+    // categories are fixed; keep this simple and hand-rolled rather than
+    // adding an endpoint just to enumerate them
+    const cats = ['Cash Back', 'Travel', 'Student', 'Business', 'Low Rate', 'Building Credit', 'Premium'];
+    el('semCategory').append(...cats.map((c) => { const o = document.createElement('option'); o.value = c; o.textContent = c; return o; }));
+  }
+
+  function setVerdict(redisVal, postgresVal, { lowerIsBetter = true, matchOk = true, mismatchLabel = '' } = {}) {
+    el('verdict').classList.toggle('warn', !matchOk);
+    if (!matchOk) { el('vx').textContent = mismatchLabel; el('vlbl').textContent = ''; return; }
+    const redisWins = lowerIsBetter ? redisVal <= postgresVal : redisVal >= postgresVal;
+    const ratio = redisWins
+      ? (lowerIsBetter ? postgresVal / redisVal : redisVal / postgresVal)
+      : (lowerIsBetter ? redisVal / postgresVal : postgresVal / redisVal);
+    el('vx').textContent = `${ratio.toFixed(ratio >= 10 ? 0 : 1)}×`;
+    el('vlbl').textContent = `${redisWins ? 'redis' : 'postgres'} faster`;
+  }
+
+  function renderBars(redisMs, postgresMs) {
+    const max = Math.max(redisMs, postgresMs, 0.001);
+    el('bars').replaceChildren(...[['Redis', redisMs, 'redis'], ['Postgres', postgresMs, 'postgres']].map(([name, ms, cls]) => {
+      const row = document.createElement('div'); row.className = 'bar-row';
+      const n = document.createElement('div'); n.className = 'name'; n.textContent = name;
+      const track = document.createElement('div'); track.className = 'bar-track';
+      const fill = document.createElement('div'); fill.className = `bar-fill ${cls}`;
+      fill.style.width = `${Math.max((ms / max) * 100, 0.6)}%`;
+      track.append(fill);
+      const v = document.createElement('div'); v.className = 'val'; v.textContent = `${ms.toFixed(3)} ms`;
+      row.append(n, track, v);
+      return row;
+    }));
+  }
+
+  function rowsToTable(rows, cols) {
+    if (!rows.length) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = 'no matching rows'; return d; }
+    const table = document.createElement('table');
+    const thead = document.createElement('thead'); const htr = document.createElement('tr');
+    htr.append(...cols.map(([label]) => { const th = document.createElement('th'); th.textContent = label; return th; }));
+    thead.append(htr); table.append(thead);
+    const tbody = document.createElement('tbody');
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      tr.append(...cols.map(([, key, cls, fmt]) => {
+        const td = document.createElement('td'); if (cls) td.className = cls;
+        const v = row[key]; td.textContent = fmt ? fmt(v) : (v ?? '');
+        return td;
+      }));
+      tbody.append(tr);
+    }
+    table.append(tbody);
+    return table;
+  }
+
+  const TX_COLS = [['Merchant', 'merchant'], ['Category', 'category'], ['Description', 'description'],
+    ['Amount', 'amount', 'num', (v) => `$${Number(v).toFixed(2)}`], ['Score', 'score', 'num', (v) => v.toFixed(3)]];
+  const PRODUCT_COLS = [['Name', 'name'], ['Category', 'category'], ['Annual fee', 'annual_fee', 'num', (v) => `$${v}`],
+    ['Score', 'score', 'num', (v) => v.toFixed(3)]];
+  const FAQ_COLS = [['Category', 'category'], ['Title', 'title'], ['Score', 'score', 'num', (v) => v.toFixed(3)]];
+
+  async function search() {
+    const seq = ++inflight;
+    const stale = () => seq !== inflight;
+    document.body.classList.add('loading');
+    try {
+      if (scenario === 'flat') await runVectorSearch(stale, 'flat');
+      else if (scenario === 'hnsw') await runVectorSearch(stale, 'hnsw');
+      else if (scenario === 'semantic') await runSemantic(stale);
+      else if (scenario === 'route') await runRoute(stale);
+      else if (scenario === 'throughput') await runThroughput(stale);
+      else if (scenario === 'architecture') await runArchitecture(stale);
+    } catch (err) {
+      el('method').innerHTML = `<b>Error:</b> ${err.message}`;
+    } finally {
+      if (seq === inflight) document.body.classList.remove('loading');
+    }
+  }
+
+  async function runVectorSearch(stale, algorithm) {
+    const query = el('q').value.trim() || 'coffee shop purchases';
+    const runs = el('runs').value;
+    const params = new URLSearchParams({ query, algorithm, runs, limit: 8 });
+    const d = await (await fetch(`/api/vector-search?${params}`)).json();
+    if (stale()) return;
+    el('q').value = query;
+    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.ms.toFixed(3)} ms`;
+    const recallTxt = (r) => r.recall_vs_exact == null ? '' : ` · recall@8 vs exact: ${(r.recall_vs_exact * 100).toFixed(0)}%`;
+    el('rsub').textContent = `median of ${d.runs} · ${d.redis.rows.length} results${recallTxt(d.redis)}`;
+    el('osub').textContent = `median of ${d.runs} · ${d.postgres.rows.length} results${recallTxt(d.postgres)}`;
+    setVerdict(d.redis.ms, d.postgres.ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
+    el('rcount').textContent = ''; el('ocount').textContent = '';
+    el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
+    el('rbody').replaceChildren(rowsToTable(d.redis.rows, TX_COLS));
+    el('obody').replaceChildren(rowsToTable(d.postgres.rows, TX_COLS));
+    renderBars(d.redis.ms, d.postgres.ms);
+    el('method').innerHTML = algorithm === 'hnsw'
+      ? 'Approximate nearest-neighbor search via an HNSW graph index on both engines. "recall@8 vs exact" compares this result\'s IDs against that <b>same engine\'s</b> exact (FLAT) result for the identical query — low overlap with an otherwise-correct category usually means many transactions tied at the same distance, not a wrong answer (see Methodology).'
+      : 'Exact nearest-neighbor search: RedisVL\'s FLAT algorithm vs a sequential scan in Postgres (HNSW index scans disabled for this one query) — every candidate compared, no approximation, on both sides.';
+  }
+
+  async function runSemantic(stale) {
+    const query = el('q').value.trim() || 'card with no annual fee and travel rewards';
+    const corpus = el('semCorpus').value;
+    const category = el('semCategory').value;
+    const maxFee = el('semMaxFee').value.trim();
+    const runs = el('runs').value;
+    const params = new URLSearchParams({ query, corpus, runs, limit: 8 });
+    if (category) params.set('category', category);
+    if (maxFee) params.set('max_annual_fee', maxFee);
+    const d = await (await fetch(`/api/semantic-search?${params}`)).json();
+    if (stale()) return;
+    el('q').value = query;
+    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.ms.toFixed(3)} ms`;
+    el('rsub').textContent = `median of ${d.runs} · ${d.redis.rows.length} results`;
+    el('osub').textContent = `median of ${d.runs} · ${d.postgres.rows.length} results`;
+    setVerdict(d.redis.ms, d.postgres.ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
+    el('rcount').textContent = ''; el('ocount').textContent = '';
+    el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
+    const cols = corpus === 'faq' ? FAQ_COLS : PRODUCT_COLS;
+    el('rbody').replaceChildren(rowsToTable(d.redis.rows, cols));
+    el('obody').replaceChildren(rowsToTable(d.postgres.rows, cols));
+    renderBars(d.redis.ms, d.postgres.ms);
+    el('method').innerHTML = `Vector search combined with ${category ? `a <code>category</code> filter` : 'no filter'}${maxFee ? ` and a <code>max annual fee</code> filter` : ''} in a single query on both engines — not a post-filter step.`;
+  }
+
+  function routeCard(match, engineName) {
+    const card = document.createElement('div');
+    card.className = 'route-card' + (match.route ? '' : ' no-match');
+    const name = document.createElement('div'); name.className = 'name';
+    name.textContent = match.route || 'No confident match';
+    const desc = document.createElement('div'); desc.className = 'desc';
+    desc.textContent = match.description || 'Distance exceeded every route\'s threshold.';
+    card.append(name, desc);
+    if (match.action) {
+      const action = document.createElement('div'); action.className = 'action';
+      action.textContent = `→ ${match.action}`;
+      card.append(action);
+    }
+    const dist = document.createElement('div'); dist.className = 'dist';
+    dist.textContent = match.distance == null ? '' : `cosine distance: ${match.distance.toFixed(4)}`;
+    card.append(dist);
+    return card;
+  }
+
+  async function runRoute(stale) {
+    const query = el('q').value.trim() || 'I think someone stole my card';
+    const params = new URLSearchParams({ query, runs: 3 });
+    const d = await (await fetch(`/api/semantic-route?${params}`)).json();
+    if (stale()) return;
+    el('q').value = query;
+    el('rt').textContent = `${d.redis.ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.ms.toFixed(3)} ms`;
+    el('rsub').textContent = 'median of 3'; el('osub').textContent = 'median of 3';
+    setVerdict(d.redis.ms, d.postgres.ms, { matchOk: d.agree, mismatchLabel: 'engines disagree' });
+    el('rcount').textContent = ''; el('ocount').textContent = '';
+    el('rq').textContent = 'RedisVL SemanticRouter (built-in extension)'; el('oq').textContent = 'Hand-rolled: AVG(cosine distance) per route, filtered by threshold';
+    el('rbody').replaceChildren(routeCard(d.redis.match, 'Redis'));
+    el('obody').replaceChildren(routeCard(d.postgres.match, 'Postgres'));
+    renderBars(d.redis.ms, d.postgres.ms);
+    el('method').innerHTML = 'Both engines average cosine distance to every route\'s reference utterances (RedisVL\'s own default aggregation) and pick the lowest-average route under its distance threshold — the calculation is identical, only the implementation differs: a built-in extension vs hand-written SQL.';
+  }
+
+  async function runThroughput(stale) {
+    let d;
+    try { d = await (await fetch('/api/bench-results')).json(); } catch { d = { error: 'no results' }; }
+    if (stale()) return;
+    if (d.error) {
+      el('rt').textContent = '—'; el('ot').textContent = '—';
+      el('rsub').textContent = ''; el('osub').textContent = '';
+      el('rcount').textContent = ''; el('ocount').textContent = '';
+      el('rq').textContent = ''; el('oq').textContent = '';
+      el('verdict').classList.remove('warn'); el('vx').textContent = '—'; el('vlbl').textContent = 'faster';
+      el('rbody').innerHTML = '<div class="empty">not run yet</div>'; el('obody').innerHTML = '<div class="empty">not run yet</div>';
+      el('bars').replaceChildren();
+      el('method').innerHTML = 'Run <b>python src/bench.py</b> in the project directory, then reload.';
+      return;
+    }
+    const r = d.engines.redis, o = d.engines.postgres;
+    el('rt').textContent = `${r.qps.toLocaleString()} q/s`; el('ot').textContent = `${o.qps.toLocaleString()} q/s`;
+    el('rsub').textContent = `p50 ${r.p50}ms · p99.9 ${r.p999}ms`; el('osub').textContent = `p50 ${o.p50}ms · p99.9 ${o.p999}ms`;
+    setVerdict(r.qps, o.qps, { lowerIsBetter: false });
+    el('rcount').textContent = `${d.concurrency} workers`; el('ocount').textContent = `${d.concurrency} workers`;
+    el('rq').textContent = `concurrency=${d.concurrency} duration=${d.durationSec}s`;
+    el('oq').textContent = el('rq').textContent;
+    const rows = (e) => [['throughput', `${e.qps.toLocaleString()} q/s`], ['p50', `${e.p50} ms`], ['p95', `${e.p95} ms`], ['p99', `${e.p99} ms`], ['p99.9', `${e.p999} ms`], ['max', `${e.max} ms`]];
+    const toRows = (data) => { const tb = document.createElement('div'); tb.replaceChildren(...data.map(([k,v]) => { const row=document.createElement('div'); row.style.display='flex'; row.style.justifyContent='space-between'; row.style.padding='0.3rem 0.9rem'; row.style.borderTop='1px solid var(--line)'; row.style.fontSize='0.8rem'; const a=document.createElement('span'); a.textContent=k; const b=document.createElement('span'); b.textContent=v; row.append(a,b); return row; })); return tb; };
+    el('rbody').replaceChildren(toRows(rows(r))); el('obody').replaceChildren(toRows(rows(o)));
+    renderBars(r.p999, o.p999);
+    el('method').innerHTML = 'Concurrent vector-search QPS under worker-based load, engines run sequentially.';
+  }
+
+  async function runArchitecture(stale) {
+    const d = await (await fetch('/api/architecture')).json();
+    if (stale()) return;
+    el('rt').textContent = `${d.redis.db_size.toLocaleString()}`; el('ot').textContent = `${d.postgres.transactions.num_rows.toLocaleString()}`;
+    el('rsub').textContent = 'keys'; el('osub').textContent = 'rows in transactions';
+    el('verdict').classList.remove('warn'); el('vx').textContent = '—'; el('vlbl').textContent = '';
+    el('rcount').textContent = ''; el('ocount').textContent = '';
+    const rIndexes = Object.entries(d.redis).filter(([k]) => k !== 'db_size').map(([k, v]) => `${k}: ${v ? `${v.num_docs} docs, ${v.algorithm || 'n/a'}` : 'n/a'}`).join('\\n');
+    el('rq').textContent = rIndexes;
+    el('oq').textContent = d.postgres.indexes.map((i) => i.def).join('\\n');
+    el('rbody').innerHTML = `<div class="empty">${Object.keys(d.redis).length - 1} indexes + the semantic router — see query pane</div>`;
+    el('obody').replaceChildren(rowsToTable(d.postgres.indexes.map((i) => ({ index: i.name })), [['Index', 'index']]));
+    el('bars').replaceChildren();
+    el('method').innerHTML = 'Live schema introspection: RedisVL indexes (FT.INFO) on the left, Postgres indexes (pg_indexes) on the right.';
+  }
+</script>
+</body>
+</html>
