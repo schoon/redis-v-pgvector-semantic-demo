@@ -1,8 +1,9 @@
 # redis-v-pgvector-semantic-demo
 
 A demo comparing Redis (RedisVL) against Postgres (pgvector) for vector
-search, hybrid semantic search, and semantic intent routing, over a
-fictitious credit-card company's transactions, card products, and
+search, hybrid semantic search, semantic caching, and semantic intent
+routing (including routing straight into the right downstream search),
+over a fictitious credit-card company's transactions, card products, and
 support FAQ. Python/FastAPI backend, single-file vanilla frontend, both
 engines in Docker.
 
@@ -42,6 +43,26 @@ same route with the same distance to 6 decimal places. If you touch
 `pg_store.route_query()`, re-verify against `redis_store.route_query()`
 for the same sentences before assuming a simplification is equivalent.
 
+**Routing doesn't stop at naming an intent — it searches the right
+corpus with the SAME embedding, on both engines.** Each route in
+`routes.py` has a `search_target` (`"products"`, `"faq"`, or `None`).
+`route_query()` on both sides reuses the query vector it already
+computed for classification to immediately search that corpus — no
+second `embed()` call, no manual "which index" branching in application
+code. Verified directly: for `"which card is best for travel"`, both
+engines route to `card_recommendation` and return the identical top-3
+products in the same order.
+
+**Semantic caching has no pgvector-side equivalent, and that's the
+point, not a gap to fill.** `pg_store.py` doesn't get a hand-rolled
+cache to keep things "fair" — a fair comparison here means Postgres
+does exactly what it would really do: recompute every time, since it
+has no caching primitive. `cached_transaction_search()` (not
+`cached_product_search()` — see docs/METHODOLOGY.md for why the target
+changed) caches the *expensive* exact-search scenario, not the trivially
+cheap 15-row product search, so the win is real and visible rather than
+sub-millisecond and easy to dismiss.
+
 ## Stack
 
 - **Backend:** Python 3.12, FastAPI + Uvicorn.
@@ -72,7 +93,7 @@ python src/validate.py     # independent ground-truth checks
 `seed_redis.py`/`seed_pg.py` are safe to re-run; both wipe their engine
 first.
 
-## Two real bugs, both load-bearing fixes — don't undo them
+## Three real bugs, all load-bearing fixes — don't undo them
 
 **`tx_hnsw_idx` must be created AFTER `load_transactions()`, never
 before.** Building the HNSW index up front and letting RediSearch add
@@ -100,6 +121,19 @@ cluster for a query with no exact match in the corpus. Raised to 40 in
 engines, not to flatter either one. Don't drop this back to the library
 default; measure recall again if you do.
 
+**`redis_store.route_query()` must embed BEFORE starting its timer and
+call `router(vector=vec)`, never `router(statement=query_text)`.** The
+latter embeds internally, charging Redis's measured time for a ~6ms
+local embedding step that `pg_store.route_query()`'s measurement already
+excludes (it always embedded before its own timer too). This single
+line made routing look like a 5× Postgres win when the actual Redis
+round trip was faster than Postgres's the whole time — profiled and
+confirmed via `embed()`-alone vs `router(vector=...)`-alone timing
+before fixing. See docs/METHODOLOGY.md for the full profile. If you
+touch either `route_query()`, re-time embed-only vs. round-trip-only
+before trusting the combined number — this bug produced numbers that
+looked plausible, not obviously broken.
+
 ## Other things not to "clean up"
 
 **RedisVL query results always include an `id` key of their own — the
@@ -114,10 +148,11 @@ reintroduce a field literally named `id`.
 winner and ratio directly from the two on-screen `ms`/`qps` values,
 never from a server-supplied ratio.** A sibling demo in this series
 shipped a version that assumed one engine always wins and rendered a
-nonsensical result once that stopped being true. This demo's numbers are
-genuinely mixed — Postgres wins on HNSW search and on routing at this
-corpus's scale (see docs/METHODOLOGY.md) — so `setVerdict()` has to get
-the direction right every time, not most of the time.
+nonsensical result once that stopped being true. This demo's numbers
+aren't uniform either — HNSW search and routing are roughly even at
+this corpus's scale, sometimes landing on either side by a small margin
+(see docs/METHODOLOGY.md) — so `setVerdict()` has to get the direction
+right every time, not most of the time.
 
 **Recall numbers near 0% on the HNSW tab, with an otherwise-correct
 category, are a tie-breaking artifact, not a bug.** Many transactions
@@ -145,7 +180,14 @@ can run the embedding model under Python's GIL, not either datastore.
 - `faq:<article_id>` — Hash, indexed by `faq_idx` (FLAT + TAG filtering).
 - `intent_router` — RedisVL `SemanticRouter`'s own index and reference
   keys, built from `routes.py`'s `ROUTES`, untouched by this repo's code
-  beyond passing in a `CustomTextVectorizer`.
+  beyond passing in a `CustomTextVectorizer`. Each `Route`'s `metadata`
+  dict carries `description`/`action`/`search_target` — client-side only,
+  never written to Redis (RedisVL's `_add_routes()` doesn't persist it),
+  which is why `route_query()` reads it off `router.get(name).metadata`
+  rather than expecting to fetch it back from a hash field.
+- `tx_search_cache` — RedisVL `SemanticCache`'s own index and entry keys.
+  Cleared at the start of every `/api/semantic-cache` call so the "first
+  call" in that demo is always a genuine miss.
 
 No customer/card data is loaded into either engine — see
 "What this demo does not support" in docs/METHODOLOGY.md for why.
@@ -160,7 +202,12 @@ disables index scans for that one query (`SET LOCAL enable_indexscan/
 enable_bitmapscan = off`) rather than using a second table or column.
 `routes`/`route_references` hold the hand-rolled router's data — same
 `ROUTES` definition as `redis_store.py`'s `SemanticRouter`, loaded by
-`pg_store.load_routes()`.
+`pg_store.load_routes()`. `routes.search_target` is a real column (not
+client-side-only like Redis's route metadata), read back in
+`pg_store.route_query()`'s own SQL to decide whether to run a follow-up
+corpus search. There is no cache table — pgvector's side of the
+semantic-caching scenario is just `vector_search_flat()`, called fresh
+every time.
 
 ## Layout
 

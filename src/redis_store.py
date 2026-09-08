@@ -18,12 +18,23 @@ untouched, wrapped around the exact same `embeddings.embed`/`embed_many`
 functions the rest of this file uses (via `CustomTextVectorizer`), so
 "how RedisVL routes a sentence" is not a separately-tuned code path from
 "how RedisVL searches a sentence."
+
+`build_semantic_cache()`/`cached_transaction_search()` use RedisVL's
+`SemanticCache` extension the same way — same shared vectorizer, no
+separate embedding path. There is no Postgres/pgvector equivalent to
+compare it against feature-for-feature: pgvector has no caching
+primitive, so the Postgres side of that scenario is just
+`pg_store.vector_search_flat()`, called fresh every time, exactly like
+the plain exact-search scenario. That asymmetry is the point of this
+scenario, not an oversight.
 """
 
+import json
 import time
 
 import numpy as np
 import redis
+from redisvl.extensions.llmcache import SemanticCache
 from redisvl.extensions.router import Route, SemanticRouter
 from redisvl.index import SearchIndex
 from redisvl.query import VectorQuery
@@ -38,6 +49,8 @@ from routes import ROUTES
 TX_FLAT_INDEX = "tx_flat_idx"
 TX_HNSW_INDEX = "tx_hnsw_idx"
 PRODUCT_INDEX = "product_idx"
+CACHE_NAME = "tx_search_cache"
+CACHE_DISTANCE_THRESHOLD = 0.15
 FAQ_INDEX = "faq_idx"
 ROUTER_NAME = "intent_router"
 
@@ -288,8 +301,8 @@ def _build_filter(category=None, max_annual_fee=None):
 # FT.SEARCH product_idx "(@category:{Travel} @annual_fee:[-inf 100])=>[KNN
 # ... ]" — vector search combined with TAG/NUMERIC filters in one query,
 # not a post-filter step.
-def semantic_search_products(client, query_text, category=None, max_annual_fee=None, limit=10):
-    vec = embed(query_text)
+def semantic_search_products(client, query_text=None, category=None, max_annual_fee=None, limit=10, vector=None):
+    vec = vector if vector is not None else embed(query_text)
     filt = _build_filter(category, max_annual_fee)
     return _run_vector_query(
         client, PRODUCT_INDEX, vec, limit, filter_expression=filt,
@@ -297,8 +310,8 @@ def semantic_search_products(client, query_text, category=None, max_annual_fee=N
     )
 
 
-def semantic_search_faq(client, query_text, category=None, limit=10):
-    vec = embed(query_text)
+def semantic_search_faq(client, query_text=None, category=None, limit=10, vector=None):
+    vec = vector if vector is not None else embed(query_text)
     filt = Tag("category") == category if category else None
     return _run_vector_query(
         client, FAQ_INDEX, vec, limit, filter_expression=filt,
@@ -313,7 +326,7 @@ def build_router(client, overwrite=False):
             name=r["name"],
             references=r["references"],
             distance_threshold=r["distance_threshold"],
-            metadata={"description": r["description"], "action": r["action"]},
+            metadata={"description": r["description"], "action": r["action"], "search_target": r["search_target"]},
         )
         for r in ROUTES
     ]
@@ -326,22 +339,94 @@ def build_router(client, overwrite=False):
     )
 
 
-def route_query(router, query_text):
+def route_query(router, client, query_text):
+    # Embed BEFORE starting the timer and call router(vector=...), not
+    # router(statement=...) — the latter embeds internally, which would
+    # charge Redis's measured time for the same embedding step that
+    # pg_store.route_query() already excludes (it embeds before its own
+    # t0 too). Measured impact of getting this wrong: ~6ms of embedding
+    # time on top of a genuine ~0.7ms Redis round trip — enough on its
+    # own to flip who looks faster.
+    vec = embed(query_text)
     t0 = time.perf_counter()
-    match = router(statement=query_text)
+    match = router(vector=vec)
     ms = (time.perf_counter() - t0) * 1000
     route = router.get(match.name) if match.name else None
+    search_target = route.metadata.get("search_target") if route else None
+
+    # "Route to the right vector search": the SAME query embedding used
+    # to classify the intent is reused to search whichever corpus that
+    # intent maps to — no second embed() call, no manual "which index"
+    # logic in application code. Timed separately from routing itself,
+    # not folded into `ms`, so the two costs stay visible rather than
+    # conflated into one number.
+    search_result = None
+    search_ms = None
+    if search_target == "products":
+        rows, search_ms, _ = semantic_search_products(client, limit=3, vector=vec)
+        search_result = rows
+    elif search_target == "faq":
+        rows, search_ms, _ = semantic_search_faq(client, limit=3, vector=vec)
+        search_result = rows
+
     return {
         "route": match.name,
         "distance": match.distance,
         "description": route.metadata.get("description") if route else None,
         "action": route.metadata.get("action") if route else None,
+        "search_target": search_target,
+        "search_result": search_result,
+        "search_ms": search_ms,
     }, ms
+
+
+# RedisVL's SemanticCache extension, wrapped around the same shared
+# vectorizer as everything else. distance_threshold=0.15 is deliberately
+# a bit looser than the library default (0.1) — loose enough to catch an
+# obvious paraphrase of a cached question, tight enough not to conflate
+# genuinely different questions.
+def build_semantic_cache(client, overwrite=False):
+    vectorizer = CustomTextVectorizer(embed=embed, embed_many=embed_many)
+    return SemanticCache(
+        name=CACHE_NAME,
+        distance_threshold=CACHE_DISTANCE_THRESHOLD,
+        vectorizer=vectorizer,
+        redis_client=client,
+        overwrite=overwrite,
+    )
+
+
+# Caches transaction search results, not product search — the point of
+# this scenario is "repeating an expensive question shouldn't repeat the
+# expensive work," and the exact/FLAT transaction search is the
+# expensive operation in this demo (Postgres ~15-18ms; see the vector
+# search scenario). Caching the 15-row product search would barely be
+# visible against either engine's already-sub-millisecond cost there.
+#
+# Embedding happens BEFORE the timer starts, same convention as every
+# other scenario in this file — a cache hit and a cache miss both still
+# have to embed the incoming query to know whether anything matches, so
+# excluding it here isolates the same thing it isolates everywhere else:
+# the datastore-side cost, not a client-side cost identical on both
+# engines regardless of caching.
+def cached_transaction_search(cache, client, query_text=None, limit=8, vector=None):
+    vec = vector if vector is not None else embed(query_text)
+    t0 = time.perf_counter()
+    hits = cache.check(vector=vec)
+    if hits:
+        rows = json.loads(hits[0]["response"])
+        ms = (time.perf_counter() - t0) * 1000
+        distance = float(hits[0].get("vector_distance", 0))
+        return rows, ms, True, f"CACHE HIT (distance {distance:.4f} <= {CACHE_DISTANCE_THRESHOLD}) — tx_flat_idx not queried"
+    rows, _, query_str = vector_search_flat(client, limit=limit, vector=vec)
+    cache.store(prompt=query_text or "(precomputed vector)", response=json.dumps(rows), vector=vec)
+    ms = (time.perf_counter() - t0) * 1000
+    return rows, ms, False, f"CACHE MISS — computed via {query_str}, stored for next time"
 
 
 def architecture_info(client):
     info = {}
-    for name in (TX_FLAT_INDEX, TX_HNSW_INDEX, PRODUCT_INDEX, FAQ_INDEX, ROUTER_NAME):
+    for name in (TX_FLAT_INDEX, TX_HNSW_INDEX, PRODUCT_INDEX, FAQ_INDEX, ROUTER_NAME, CACHE_NAME):
         try:
             raw = client.ft(name).info()
             info[name] = {

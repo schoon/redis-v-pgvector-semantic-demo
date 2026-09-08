@@ -11,6 +11,15 @@ question is never "whose route list is right" — there's only one.
 Every route's `distance_threshold` is a cosine-distance cutoff (0 =
 identical, 2 = opposite) below which a match counts as that route at
 all. Below the threshold, both engines answer "no confident match."
+
+`search_target` names which corpus (`"products"`, `"faq"`, or `None`)
+answers this intent directly. This is the "route to the right vector
+search" scenario: once a question is classified, if `search_target` is
+set, both engines immediately run that corpus's own semantic search
+using the SAME query embedding — no second embedding call, no manual
+"which index do I search" logic in application code, just routing
+deciding it. `None` means the intent needs real account data (a
+balance, a due date) that no static corpus in this demo can answer.
 """
 
 ROUTES = [
@@ -19,6 +28,7 @@ ROUTES = [
         "description": "Customer wants to dispute or ask about disputing a charge.",
         "action": "Open a dispute case on the flagged transaction and issue a temporary credit.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "I don't recognize this charge on my statement",
             "I want to dispute a transaction",
@@ -39,6 +49,7 @@ ROUTES = [
         "description": "Customer suspects fraud, a stolen card, or unauthorized account access.",
         "action": "Freeze the card immediately, open a fraud case, and issue a replacement card.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "My card was stolen and I need to report it",
             "I think someone is using my card without permission",
@@ -57,6 +68,7 @@ ROUTES = [
         "description": "Customer wants their current balance or available credit.",
         "action": "Return the current balance and available credit for the customer's card.",
         "distance_threshold": 0.5,
+        "search_target": None,
         "references": [
             "What is my current credit card balance",
             "How much do I owe on my card right now",
@@ -73,6 +85,7 @@ ROUTES = [
         "description": "Customer asks about when a payment is due or payment scheduling.",
         "action": "Return the next payment due date and minimum payment amount.",
         "distance_threshold": 0.5,
+        "search_target": None,
         "references": [
             "When is my credit card payment due",
             "What day of the month do I need to pay by",
@@ -89,6 +102,7 @@ ROUTES = [
         "description": "Customer wants to request or ask about a higher credit limit.",
         "action": "Run a soft credit check and route to the credit-limit-increase workflow.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "I want to request a credit limit increase",
             "Can you raise my credit limit",
@@ -104,6 +118,7 @@ ROUTES = [
         "description": "Customer wants help choosing which credit card product fits their spending.",
         "action": "Run a semantic search over the card product catalog and recommend the best match.",
         "distance_threshold": 0.5,
+        "search_target": "products",
         "references": [
             "Which card is best for someone who travels a lot",
             "I'm looking for a card with no annual fee",
@@ -122,6 +137,7 @@ ROUTES = [
         "description": "Customer asks how rewards, points, or cash back work on an existing card.",
         "action": "Return the rewards program details for the customer's current card product.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "How do my cash back rewards get paid out",
             "Do my points expire",
@@ -136,6 +152,7 @@ ROUTES = [
         "description": "Customer asks about interest rate, APR, or how interest is calculated.",
         "action": "Return the customer's current APR and a plain-language explanation of how interest accrues.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "What is my current interest rate",
             "How is interest calculated on my balance",
@@ -150,6 +167,7 @@ ROUTES = [
         "description": "Customer asks about fees for using their card abroad or in a foreign currency.",
         "action": "Return whether the customer's card charges a foreign transaction fee and the rate.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "Does my card charge a fee for purchases made abroad",
             "I'm traveling internationally, will I be charged extra",
@@ -163,6 +181,7 @@ ROUTES = [
         "description": "Customer wants to close their credit card account.",
         "action": "Confirm the balance is paid in full, then route to account closure.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "I want to close my credit card account",
             "How do I cancel this card",
@@ -176,6 +195,7 @@ ROUTES = [
         "description": "Customer has a question about reading or receiving their statement.",
         "action": "Explain the statement cycle and offer to enable paper or electronic statements.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "When is my statement generated each month",
             "Why is my statement balance different from my current balance",
@@ -189,6 +209,7 @@ ROUTES = [
         "description": "Customer asks about adding or removing an authorized user on their account.",
         "action": "Start the authorized-user add/remove workflow on the customer's account.",
         "distance_threshold": 0.5,
+        "search_target": "faq",
         "references": [
             "How do I add an authorized user to my account",
             "Can my spouse get a card on my account",

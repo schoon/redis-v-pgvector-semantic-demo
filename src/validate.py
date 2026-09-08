@@ -174,7 +174,7 @@ def main():
     for utt in test_utterances:
         qvec = embed(utt)
         truth_name, _ = independent_route(qvec, route_refs_by_name)
-        r_match, _ = rs.route_query(router, utt)
+        r_match, _ = rs.route_query(router, redis_client, utt)
         p_match, _ = pgs.route_query(pg_conn, utt)
         route_checked += 1
         if r_match["route"] != truth_name or p_match["route"] != truth_name:
@@ -186,6 +186,23 @@ def main():
            f"{route_checked} utterances checked, {route_mismatch} mismatches")
     record("Redis and Postgres agree on every routing decision", agree_mismatch == 0,
            f"{agree_checked} utterances, {agree_mismatch} disagreements")
+
+    # ---- Route-to-the-right-search: same route -> same top search hit -----
+    search_checked, search_mismatch = 0, 0
+    for utt in test_utterances:
+        r_match, _ = rs.route_query(router, redis_client, utt)
+        p_match, _ = pgs.route_query(pg_conn, utt)
+        target = r_match.get("search_target")
+        if target not in ("products", "faq"):
+            continue
+        search_checked += 1
+        r_key = lambda row: row.get("product_id") or row.get("article_id")
+        r_top = r_key(r_match["search_result"][0]) if r_match["search_result"] else None
+        p_top = r_key(p_match["search_result"][0]) if p_match["search_result"] else None
+        if r_top is None or r_top != p_top:
+            search_mismatch += 1
+    record("Route-to-search: both engines' top hit agrees", search_mismatch == 0,
+           f"{search_checked} routed utterances checked, {search_mismatch} mismatches")
 
     failed = [c for c, p in results if not p]
     print(f"\n  {len(results)} checks · {len(results) - len(failed)} passed · {len(failed)} failed")

@@ -137,6 +137,7 @@
       <button data-s="flat">Vector search — exact (FLAT/KNN)</button>
       <button data-s="hnsw">Vector search — approximate (HNSW)</button>
       <button data-s="semantic">Semantic search</button>
+      <button data-s="cache">Semantic caching</button>
       <button data-s="route">Semantic routing</button>
       <button data-s="throughput">Throughput</button>
       <button data-s="architecture">Architecture</button>
@@ -158,6 +159,10 @@
       </label>
       <label class="inline">category <select id="semCategory"><option value="">any</option></select></label>
       <label class="inline">max annual fee <input type="number" id="semMaxFee" style="width:6rem" placeholder="any"></label>
+    </div>
+
+    <div class="filters" id="cacheFilters">
+      <label class="inline">simulate <input type="number" id="cacheRepeats" style="width:5rem" value="5" min="1" max="20"> repeat questions</label>
     </div>
 
     <div class="progress" id="progress"></div>
@@ -215,7 +220,8 @@
     flat: { hint: 'Exact (FLAT/KNN) nearest-neighbor search over 40,000 embedded transaction descriptions — every candidate compared, no approximation.' },
     hnsw: { hint: 'Approximate (HNSW) nearest-neighbor search — same transactions, same query, a graph index instead of brute force.' },
     semantic: { hint: 'Semantic search with metadata filters, in one query — not vector search followed by a separate filter step.', filters: true },
-    route: { hint: 'Classify a customer question into a support intent — RedisVL\'s built-in SemanticRouter vs a hand-rolled pgvector equivalent.', noRuns: true },
+    cache: { hint: 'Repeat/popular traffic for the same question — RedisVL\'s SemanticCache vs Postgres, which has no caching layer and recomputes every single call.', cacheFilters: true, noRuns: true },
+    route: { hint: 'Route a customer question to the right intent, then straight into the right vector search — RedisVL\'s built-in SemanticRouter vs a hand-rolled pgvector equivalent.', noRuns: true },
     throughput: { hint: 'Concurrent entitlement-style vector search QPS, run npm run bench equivalent (see README).', noControls: true },
     architecture: { hint: 'Live schema introspection for both engines.', noControls: true },
   };
@@ -224,6 +230,7 @@
     flat: ['coffee shop purchases', 'hotel stays', 'airline ticket charges', 'monthly streaming subscription', 'gas station fill-up'],
     hnsw: ['coffee shop purchases', 'hotel stays', 'airline ticket charges', 'monthly streaming subscription', 'gas station fill-up'],
     semantic: ['card with no annual fee and travel rewards', 'best card for grocery spending', 'how do I dispute a charge', 'foreign transaction fee'],
+    cache: ['coffee shop purchases', 'hotel stays', 'airline ticket charges', 'monthly streaming subscription', 'gas station fill-up'],
   };
 
   function setScenario(next) {
@@ -234,6 +241,7 @@
     el('controls').style.display = cfg.noControls ? 'none' : '';
     el('runs').closest('label').style.display = cfg.noRuns ? 'none' : '';
     el('semanticFilters').classList.toggle('show', Boolean(cfg.filters));
+    el('cacheFilters').classList.toggle('show', Boolean(cfg.cacheFilters));
     el('summary').hidden = false;
     el('panes').hidden = false;
     if (next === 'route') {
@@ -262,6 +270,7 @@
   el('semCorpus').addEventListener('change', search);
   el('semCategory').addEventListener('change', search);
   el('semMaxFee').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+  el('cacheRepeats').addEventListener('change', search);
 
   async function loadDropdowns() {
     const products = await (await fetch('/api/architecture')).json().catch(() => null);
@@ -331,6 +340,7 @@
       if (scenario === 'flat') await runVectorSearch(stale, 'flat');
       else if (scenario === 'hnsw') await runVectorSearch(stale, 'hnsw');
       else if (scenario === 'semantic') await runSemantic(stale);
+      else if (scenario === 'cache') await runSemanticCache(stale);
       else if (scenario === 'route') await runRoute(stale);
       else if (scenario === 'throughput') await runThroughput(stale);
       else if (scenario === 'architecture') await runArchitecture(stale);
@@ -388,6 +398,37 @@
     el('method').innerHTML = `Vector search combined with ${category ? `a <code>category</code> filter` : 'no filter'}${maxFee ? ` and a <code>max annual fee</code> filter` : ''} in a single query on both engines — not a post-filter step.`;
   }
 
+  function callLogTable(calls, engine) {
+    const cols = engine === 'redis'
+      ? [['Call', 'i'], ['Result', 'tag'], ['Latency', 'ms', 'num', (v) => `${v.toFixed(3)} ms`]]
+      : [['Call', 'i'], ['Latency', 'ms', 'num', (v) => `${v.toFixed(3)} ms`]];
+    const rows = calls.map((c) => ({
+      i: c.i + 1,
+      tag: c.redis_hit ? 'CACHE HIT' : 'cache miss',
+      ms: engine === 'redis' ? c.redis_ms : c.postgres_ms,
+    }));
+    return rowsToTable(rows, cols);
+  }
+
+  async function runSemanticCache(stale) {
+    const query = el('q').value.trim() || 'coffee shop purchases';
+    const repeats = el('cacheRepeats').value || 5;
+    const params = new URLSearchParams({ query, repeats, limit: 8 });
+    const d = await (await fetch(`/api/semantic-cache?${params}`)).json();
+    if (stale()) return;
+    el('q').value = query;
+    el('rt').textContent = `${d.redis.repeat_avg_ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.repeat_avg_ms.toFixed(3)} ms`;
+    el('rsub').textContent = `avg of ${d.repeats - 1} repeat calls · first call ${d.redis.first_ms.toFixed(3)} ms`;
+    el('osub').textContent = `avg of ${d.repeats - 1} repeat calls · first call ${d.postgres.first_ms.toFixed(3)} ms`;
+    setVerdict(d.redis.repeat_avg_ms, d.postgres.repeat_avg_ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
+    el('rcount').textContent = ''; el('ocount').textContent = '';
+    el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
+    el('rbody').replaceChildren(callLogTable(d.calls, 'redis'));
+    el('obody').replaceChildren(callLogTable(d.calls, 'postgres'));
+    renderBars(d.redis.repeat_avg_ms, d.postgres.repeat_avg_ms);
+    el('method').innerHTML = `Simulating ${d.repeats} people asking the same (or a near-duplicate) question. Redis checks its SemanticCache first — call 1 misses and populates it, every call after that hits and never touches <code>tx_flat_idx</code>. Postgres has no caching layer, so it re-runs the full exact search every single call — there is no "first vs. repeat" distinction on that side, by design. The cache is cleared before this simulation starts so call 1 is a genuine miss.`;
+  }
+
   function routeCard(match, engineName) {
     const card = document.createElement('div');
     card.className = 'route-card' + (match.route ? '' : ' no-match');
@@ -404,6 +445,23 @@
     const dist = document.createElement('div'); dist.className = 'dist';
     dist.textContent = match.distance == null ? '' : `cosine distance: ${match.distance.toFixed(4)}`;
     card.append(dist);
+    if (match.search_target && match.search_result) {
+      const label = document.createElement('div'); label.className = 'action';
+      label.style.marginTop = '0.6rem';
+      const corpusName = match.search_target === 'products' ? 'card products' : 'FAQ articles';
+      label.textContent = `→ routed to ${corpusName} search (${match.search_ms.toFixed(3)} ms) — top match:`;
+      card.append(label);
+      const top = match.search_result[0];
+      const hit = document.createElement('div'); hit.className = 'desc';
+      hit.style.marginTop = '0.3rem';
+      hit.textContent = top.name || top.title || '';
+      card.append(hit);
+    } else if (match.route && !match.search_target) {
+      const label = document.createElement('div'); label.className = 'action';
+      label.style.marginTop = '0.6rem';
+      label.textContent = '→ needs live account data — no static corpus in this demo answers this';
+      card.append(label);
+    }
     return card;
   }
 
@@ -421,7 +479,7 @@
     el('rbody').replaceChildren(routeCard(d.redis.match, 'Redis'));
     el('obody').replaceChildren(routeCard(d.postgres.match, 'Postgres'));
     renderBars(d.redis.ms, d.postgres.ms);
-    el('method').innerHTML = 'Both engines average cosine distance to every route\'s reference utterances (RedisVL\'s own default aggregation) and pick the lowest-average route under its distance threshold — the calculation is identical, only the implementation differs: a built-in extension vs hand-written SQL.';
+    el('method').innerHTML = 'Both engines average cosine distance to every route\'s reference utterances (RedisVL\'s own default aggregation) and pick the lowest-average route under its distance threshold — the calculation is identical, only the implementation differs: a built-in extension vs hand-written SQL. When the matched intent maps to a searchable corpus, both engines immediately reuse the SAME query embedding to search it — no second embed() call, no manual "which index" logic in application code.';
   }
 
   async function runThroughput(stale) {

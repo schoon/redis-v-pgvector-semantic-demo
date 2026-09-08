@@ -70,8 +70,11 @@ def main():
     rs.vector_search_flat(client, "warm up query", limit=1)
     rs.vector_search_hnsw(client, "warm up query", limit=1)
     rs.semantic_search_products(client, "warm up query", limit=1)
+    rs.semantic_search_faq(client, "warm up query", limit=1)
     router = rs.build_router(client, overwrite=False)
-    rs.route_query(router, "warm up query")
+    rs.route_query(router, client, "warm up query")
+    cache = rs.build_semantic_cache(client, overwrite=False)
+    cache.clear()
     print("Warm-up complete.")
 
     info = rs.architecture_info(client)

@@ -1,17 +1,22 @@
 # redis-v-pgvector-semantic-demo
 
-Side-by-side **vector search**, **hybrid semantic search**, and
-**semantic intent routing** — **Redis (RedisVL)** vs **Postgres
-(pgvector)** — over a fictitious credit-card company's transactions,
-card products, and support FAQ, with per-query latency shown live.
+Side-by-side **vector search**, **hybrid semantic search**, **semantic
+caching**, and **semantic intent routing** — **Redis (RedisVL)** vs
+**Postgres (pgvector)** — over a fictitious credit-card company's
+transactions, card products, and support FAQ, with per-query latency
+shown live.
 
 > **Method and caveats live in [docs/METHODOLOGY.md](docs/METHODOLOGY.md).**
 > Read it before presenting — it covers two real HNSW bugs found while
 > building this (building the index before the bulk load, and RedisVL's
-> default query-time candidate count being too low for this corpus),
-> why semantic routing runs the *identical* classification algorithm on
-> both engines rather than two similar ones, and what this demo does
-> not support.
+> default query-time candidate count being too low for this corpus), a
+> real timing bug that made routing look far slower than it is (embedding
+> the query inside vs. outside the timed call), why semantic routing runs
+> the *identical* classification algorithm on both engines rather than
+> two similar ones, why semantic caching has no pgvector-side equivalent
+> to compare against feature-for-feature, and what this demo does not
+> support (including a newer Redis primitive — Vector Sets — considered
+> and deliberately not used here).
 
 No real customer or transaction data of any kind — every ID, name, and
 number in the corpus is synthetic. See
@@ -59,7 +64,8 @@ No volumes are declared, so this discards the data. Re-run
 | **Vector search — exact (FLAT/KNN)** | `FT.SEARCH` FLAT algorithm | sequential scan (HNSW index scans disabled for this query) |
 | **Vector search — approximate (HNSW)** | `FT.SEARCH` HNSW algorithm | `ORDER BY embedding <=> query` via the HNSW index |
 | **Semantic search** | `FT.SEARCH` vector + TAG/NUMERIC filter, one query | `WHERE` + `ORDER BY embedding <=>`, one query |
-| **Semantic routing** | RedisVL `SemanticRouter` (built-in extension) | hand-rolled SQL replicating the identical algorithm |
+| **Semantic caching** | RedisVL `SemanticCache` (built-in extension) — repeat/similar questions hit the cache, skip the search entirely | no caching primitive — every call re-runs the full search |
+| **Semantic routing** | RedisVL `SemanticRouter` (built-in extension); a matched intent immediately reuses the same query embedding to search the right corpus | hand-rolled SQL replicating the identical classification, then the same corpus search |
 | **Concurrent throughput** | `python src/bench.py` | `python src/bench.py` |
 | **Architecture** | live schema introspection | live schema introspection |
 
@@ -79,37 +85,56 @@ Median of 3 runs per sample.
 
 | Scenario | Redis | Postgres | Winner |
 | -------- | ----- | -------- | ------ |
-| Vector search (exact) | 2.7–4.5 ms | 15.3–18.0 ms | **Redis, ~5–6×** |
-| Vector search (HNSW) | 0.9–2.5 ms | 0.4–1.1 ms | **Postgres, ~2×** |
-| Semantic search — products | 1.2–2.1 ms | 1.0–1.6 ms | roughly even |
-| Semantic search — FAQ | 1.2–1.6 ms | 0.9–2.8 ms | roughly even |
-| Semantic routing | 6.9–7.4 ms | 1.4–1.6 ms | **Postgres, ~5×** |
+| Vector search (exact) | 2.9–4.1 ms | 17.1–18.9 ms | **Redis, ~5–6×** |
+| Vector search (HNSW) | 1.0–1.4 ms | 0.4–1.5 ms | roughly even |
+| Semantic search — products | 0.8–1.1 ms | 0.6–0.9 ms | roughly even |
+| Semantic search — FAQ | 1.1–1.2 ms | 1.0–1.3 ms | roughly even |
+| Semantic caching — first call (miss) | 6.6–10.7 ms | 19.7–32.2 ms | **Redis, ~3×** |
+| Semantic caching — repeat calls (avg) | 0.8–1.2 ms | 16.7–27.3 ms | **Redis, ~18–20×** |
+| Semantic routing | 1.1–1.7 ms | 1.0–1.3 ms | roughly even |
 
-**This is the honest number, not the flattering one, and it's a mixed
-result at this scale — deliberately reported that way.** Two scenarios
-favor Postgres here:
+**A real measurement bug used to make routing look much worse than it
+is — worth naming, not just quietly fixing.** An earlier version of
+`redis_store.route_query()` called RedisVL's `router(statement=query)`,
+which embeds the query text *inside* the timed call; `pg_store.py`'s
+equivalent embeds *before* starting its own timer. That's not a small
+difference — local embedding took ~6ms on this laptop, dwarfing the
+actual ~0.7ms Redis round trip it was being added to, and made routing
+look like a 5× Postgres win. Embedding the query first and calling
+`router(vector=...)` (matching what `pg_store.py` already did) turned
+that into the roughly-even result above. See
+[Methodology](docs/METHODOLOGY.md) for the full writeup — this is
+exactly the kind of asymmetric-timing bug the "both engines answer the
+same question" discipline in CLAUDE.md exists to catch, and it had been
+sitting in the numbers unnoticed until directly profiled.
 
-- **HNSW** — both engines' HNSW result matches their own exact result's
-  score exactly (verified — see [Methodology](docs/METHODOLOGY.md)); the
-  *specific* transaction IDs returned differ because many transactions
-  share identical text and so tie exactly on distance, and each engine
-  breaks those ties in its own deterministic order. Postgres happens to
-  be a bit faster per query at this row count; that's a real, measured
-  result, not an error on either side.
-- **Semantic routing** — RedisVL's `SemanticRouter` runs an
-  `FT.AGGREGATE` pipeline built to stay fast as a reference set grows
-  into the thousands; at 87 reference utterances, a hand-written
-  `GROUP BY` in Postgres has less machinery to amortize. Both compute the
-  identical classification (verified to 6 decimal places of cosine
-  distance — see Methodology) — this is about per-call overhead at small
-  scale, not correctness.
+**HNSW is a genuine, small, roughly-even result, not a bug.** Both
+engines' HNSW result matches their own exact result's score exactly
+(verified — see Methodology); the *specific* transaction IDs returned
+can differ because many transactions share identical text and tie
+exactly on distance, and each engine breaks ties in its own
+deterministic order. Whichever engine is faster by a few tenths of a
+millisecond at this row count isn't a meaningful signal either way —
+both are comfortably sub-2ms.
 
-**Redis wins decisively where the corpus is largest and where load is
-concurrent** — exact vector search over 40,000 rows, and throughput
-under concurrency (below). Whether HNSW/routing overhead flips at real
-data volume (thousands of routes, millions of vectors) is a real
-open question this demo doesn't answer — it's sized for a laptop, not a
-production data volume.
+**Semantic caching is the widest, clearest win in this demo, and it's
+architectural, not tuning.** pgvector has no caching primitive at all —
+`pg_store.py`'s side of that scenario is just the plain exact search,
+called fresh every time, because there is nothing else to call. RedisVL's
+`SemanticCache` means a repeated or paraphrased question never touches
+`tx_flat_idx` again after the first time it's asked. For a corpus this
+size the gap is already 18–20× on repeat traffic; the real story it's
+standing in for — caching an *expensive* operation (a large-corpus
+search, an LLM call) rather than a cheap 40,000-row one — would make
+the gap larger, not smaller, since the miss cost that's being avoided
+only grows.
+
+**Redis's clearest wins are semantic caching, exact vector search over
+the full 40,000-row sample, and concurrent throughput under load** — all
+shown below. At this laptop-sized scale, HNSW and hybrid semantic search
+are close enough that the honest headline there is "comparable," not
+"Redis wins everything" — see Methodology for why, and don't smooth that
+over when presenting this.
 
 ## Concurrent throughput
 

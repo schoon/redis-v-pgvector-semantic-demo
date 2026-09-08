@@ -25,6 +25,7 @@ app = FastAPI()
 redis_client = rs.connect()
 pg_conn = pgs.connect()
 router = rs.build_router(redis_client, overwrite=False)
+semantic_cache = rs.build_semantic_cache(redis_client, overwrite=False)
 
 
 def median_timed(fn, runs=3):
@@ -106,7 +107,7 @@ def semantic_route(query: str = "I think someone stole my card", runs: str = "3"
     n = clamp_runs(runs)
 
     def r_once():
-        match, ms = rs.route_query(router, query)
+        match, ms = rs.route_query(router, redis_client, query)
         return match, ms, None
 
     def p_once():
@@ -121,6 +122,46 @@ def semantic_route(query: str = "I think someone stole my card", runs: str = "3"
         "redis": {"ms": r_ms, "match": r_match},
         "postgres": {"ms": p_ms, "match": p_match},
         "agree": r_match.get("route") == p_match.get("route"),
+    }
+
+
+@app.get("/api/semantic-cache")
+def semantic_cache_demo(query: str = "coffee shop purchases", limit: int = 8, repeats: str = "5"):
+    """
+    Simulates repeat/popular traffic for the same question: `repeats`
+    sequential calls, same query text each time. Redis checks its
+    SemanticCache first (call 0 misses and populates it; every call
+    after that hits, skipping tx_flat_idx entirely). Postgres has no
+    cache, so every single call re-runs the full FLAT scan — there is no
+    "first call" vs "repeat call" distinction on that side, on purpose.
+
+    The cache is cleared at the start of every call to this endpoint so
+    "call 0" is a genuine miss each time the demo is run, not a hit left
+    over from someone else's earlier request.
+    """
+    n = max(1, min(int(repeats) if str(repeats).isdigit() else 5, 20))
+    semantic_cache.clear()
+
+    calls = []
+    for i in range(n):
+        r_rows, r_ms, r_hit, r_desc = rs.cached_transaction_search(semantic_cache, redis_client, query, limit=limit)
+        p_rows, p_ms, p_query = pgs.vector_search_flat(pg_conn, query, limit=limit)
+        calls.append({"i": i, "redis_ms": r_ms, "redis_hit": r_hit, "redis_desc": r_desc, "postgres_ms": p_ms})
+
+    repeat_calls = calls[1:] if n > 1 else calls
+    return {
+        "query": query, "repeats": n, "calls": calls,
+        "redis": {
+            "rows": r_rows, "query": r_desc,
+            "first_ms": calls[0]["redis_ms"],
+            "repeat_avg_ms": statistics.mean(c["redis_ms"] for c in repeat_calls),
+        },
+        "postgres": {
+            "rows": p_rows, "query": p_query,
+            "first_ms": calls[0]["postgres_ms"],
+            "repeat_avg_ms": statistics.mean(c["postgres_ms"] for c in repeat_calls),
+        },
+        "countsMatch": len(r_rows) == len(p_rows),
     }
 
 

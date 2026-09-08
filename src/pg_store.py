@@ -115,7 +115,8 @@ def create_schema(conn):
                 name TEXT PRIMARY KEY,
                 description TEXT NOT NULL,
                 action TEXT NOT NULL,
-                distance_threshold REAL NOT NULL
+                distance_threshold REAL NOT NULL,
+                search_target TEXT
             )
         """)
         cur.execute("""
@@ -181,8 +182,8 @@ def load_faqs(conn, rows):
 def load_routes(conn):
     with conn.cursor() as cur:
         cur.executemany(
-            "INSERT INTO routes (name, description, action, distance_threshold) VALUES (%s, %s, %s, %s)",
-            [(r["name"], r["description"], r["action"], r["distance_threshold"]) for r in ROUTES],
+            "INSERT INTO routes (name, description, action, distance_threshold, search_target) VALUES (%s, %s, %s, %s, %s)",
+            [(r["name"], r["description"], r["action"], r["distance_threshold"], r["search_target"]) for r in ROUTES],
         )
         refs = []
         for r in ROUTES:
@@ -245,8 +246,8 @@ def vector_search_hnsw(client, query_text=None, limit=10, vector=None):
     return rows, ms, sql.strip()
 
 
-def semantic_search_products(client, query_text, category=None, max_annual_fee=None, limit=10):
-    vec = _vec(embed(query_text))
+def semantic_search_products(client, query_text=None, category=None, max_annual_fee=None, limit=10, vector=None):
+    vec = vector if vector is not None else _vec(embed(query_text))
     conds = []
     cond_params = []
     if category:
@@ -273,8 +274,8 @@ def semantic_search_products(client, query_text, category=None, max_annual_fee=N
     return rows, ms, sql
 
 
-def semantic_search_faq(client, query_text, category=None, limit=10):
-    vec = _vec(embed(query_text))
+def semantic_search_faq(client, query_text=None, category=None, limit=10, vector=None):
+    vec = vector if vector is not None else _vec(embed(query_text))
     where = "WHERE category = %s" if category else ""
     params = [vec] + ([category] if category else []) + [vec, limit]
     sql = f"""
@@ -319,11 +320,11 @@ def route_query(client, query_text):
             FROM route_references rr, max_threshold
             WHERE rr.embedding <=> %s <= max_threshold.t
         )
-        SELECT r.name, r.description, r.action, r.distance_threshold,
+        SELECT r.name, r.description, r.action, r.distance_threshold, r.search_target,
                AVG(d.dist) AS avg_distance
         FROM distances d
         JOIN routes r ON r.name = d.route_name
-        GROUP BY r.name, r.description, r.action, r.distance_threshold
+        GROUP BY r.name, r.description, r.action, r.distance_threshold, r.search_target
         ORDER BY avg_distance ASC
         LIMIT 1
     """
@@ -332,16 +333,30 @@ def route_query(client, query_text):
         cur.execute(sql, (vec, vec))
         row = cur.fetchone()
         ms = (time.perf_counter() - t0) * 1000
+    no_match = {"route": None, "distance": None, "description": None, "action": None,
+                "search_target": None, "search_result": None, "search_ms": None}
     if row is None:
-        return {"route": None, "distance": None, "description": None, "action": None}, ms
-    name, description, action, threshold, avg_distance = row
+        return no_match, ms
+    name, description, action, threshold, search_target, avg_distance = row
     if avg_distance >= threshold:  # RedisVL's own filter is strict "<", matched here
-        return {"route": None, "distance": float(avg_distance), "description": None, "action": None}, ms
+        return {**no_match, "distance": float(avg_distance)}, ms
+
+    # Same "route to the right vector search" step as redis_store.py,
+    # reusing the same query embedding — no second embed() call.
+    search_result, search_ms = None, None
+    if search_target == "products":
+        search_result, search_ms, _ = semantic_search_products(client, limit=3, vector=vec)
+    elif search_target == "faq":
+        search_result, search_ms, _ = semantic_search_faq(client, limit=3, vector=vec)
+
     return {
         "route": name,
         "distance": float(avg_distance),
         "description": description,
         "action": action,
+        "search_target": search_target,
+        "search_result": search_result,
+        "search_ms": search_ms,
     }, ms
 
 
