@@ -48,26 +48,29 @@ def run_workers(worker_fn, concurrency, warmup_s, duration_s):
     stop_warmup = threading.Event()
     stop_measure = threading.Event()
     latencies_per_thread = [[] for _ in range(concurrency)]
+    warmup_errors = [0] * concurrency
     errors = [0] * concurrency
 
-    def loop(idx, phase_stop, collect):
+    def loop(idx, phase_stop, collect, error_counts):
         client = worker_fn()
-        try:
-            while not phase_stop.is_set():
-                t0 = time.perf_counter()
-                try:
-                    client()
-                except Exception:
-                    errors[idx] += 1
-                    continue
-                ms = (time.perf_counter() - t0) * 1000
-                if collect:
-                    latencies_per_thread[idx].append(ms)
-        finally:
-            pass
+        while not phase_stop.is_set():
+            t0 = time.perf_counter()
+            try:
+                client()
+            except Exception:
+                error_counts[idx] += 1
+                continue
+            ms = (time.perf_counter() - t0) * 1000
+            if collect:
+                latencies_per_thread[idx].append(ms)
 
-    # Warm-up window: same load shape, results discarded.
-    threads = [threading.Thread(target=loop, args=(i, stop_warmup, False)) for i in range(concurrency)]
+    # Warm-up window: same load shape, results discarded — including any
+    # errors. A transient hiccup while connections are first establishing
+    # has nothing to do with steady-state error rate, so it gets its own
+    # counter rather than sharing `errors` with the measured phase below
+    # (an earlier version shared one counter, silently inflating the
+    # measured run's reported error count with warm-up noise).
+    threads = [threading.Thread(target=loop, args=(i, stop_warmup, False, warmup_errors)) for i in range(concurrency)]
     for t in threads:
         t.start()
     time.sleep(warmup_s)
@@ -76,7 +79,7 @@ def run_workers(worker_fn, concurrency, warmup_s, duration_s):
         t.join()
 
     # Measured window.
-    threads = [threading.Thread(target=loop, args=(i, stop_measure, True)) for i in range(concurrency)]
+    threads = [threading.Thread(target=loop, args=(i, stop_measure, True, errors)) for i in range(concurrency)]
     wall_t0 = time.perf_counter()
     for t in threads:
         t.start()

@@ -171,6 +171,8 @@ def main():
     ]
 
     route_checked, route_mismatch, agree_checked, agree_mismatch = 0, 0, 0, 0
+    search_checked, search_mismatch = 0, 0
+    route_key = lambda row: row.get("product_id") or row.get("article_id")
     for utt in test_utterances:
         qvec = embed(utt)
         truth_name, _ = independent_route(qvec, route_refs_by_name)
@@ -182,25 +184,18 @@ def main():
         agree_checked += 1
         if r_match["route"] != p_match["route"]:
             agree_mismatch += 1
+
+        target = r_match.get("search_target")
+        if target in ("products", "faq"):
+            search_checked += 1
+            r_top = route_key(r_match["search_result"][0]) if r_match["search_result"] else None
+            p_top = route_key(p_match["search_result"][0]) if p_match["search_result"] else None
+            if r_top is None or r_top != p_top:
+                search_mismatch += 1
     record("Routing == independently-written ground truth (both engines)", route_mismatch == 0,
            f"{route_checked} utterances checked, {route_mismatch} mismatches")
     record("Redis and Postgres agree on every routing decision", agree_mismatch == 0,
            f"{agree_checked} utterances, {agree_mismatch} disagreements")
-
-    # ---- Route-to-the-right-search: same route -> same top search hit -----
-    search_checked, search_mismatch = 0, 0
-    for utt in test_utterances:
-        r_match, _ = rs.route_query(router, redis_client, utt)
-        p_match, _ = pgs.route_query(pg_conn, utt)
-        target = r_match.get("search_target")
-        if target not in ("products", "faq"):
-            continue
-        search_checked += 1
-        r_key = lambda row: row.get("product_id") or row.get("article_id")
-        r_top = r_key(r_match["search_result"][0]) if r_match["search_result"] else None
-        p_top = r_key(p_match["search_result"][0]) if p_match["search_result"] else None
-        if r_top is None or r_top != p_top:
-            search_mismatch += 1
     record("Route-to-search: both engines' top hit agrees", search_mismatch == 0,
            f"{search_checked} routed utterances checked, {search_mismatch} mismatches")
 

@@ -446,11 +446,17 @@ def _decode(v):
 def _algorithm_of(ft_info):
     # Our client runs with decode_responses=False (needed for vector byte
     # fields elsewhere), so FT.INFO's nested attribute lists come back as
-    # bytes here too — decode before comparing.
+    # bytes here too — decode before comparing. Matched by field TYPE
+    # ("VECTOR"), not by name — our own indexes name their vector field
+    # "embedding", but RedisVL's SemanticRouter/SemanticCache extensions
+    # name theirs "vector"/"prompt_vector" respectively (see
+    # redisvl.extensions.constants). Matching on "embedding" specifically
+    # left the Architecture tab reporting "n/a" for intent_router and
+    # tx_search_cache even though both really are FLAT-indexed.
     attrs = ft_info.get(b"attributes") or ft_info.get("attributes", [])
     for attr in attrs:
         flat = [_decode(x) for x in attr] if isinstance(attr, list) else []
         pairs = dict(zip(flat[::2], flat[1::2]))
-        if pairs.get("identifier") == "embedding" or pairs.get("attribute") == "embedding":
+        if pairs.get("type") == "VECTOR":
             return pairs.get("algorithm")
     return None
