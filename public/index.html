@@ -518,10 +518,10 @@
     el('rsub').textContent = 'keys'; el('osub').textContent = 'rows in transactions';
     el('verdict').classList.remove('warn'); el('vx').textContent = '—'; el('vlbl').textContent = '';
     el('rcount').textContent = ''; el('ocount').textContent = '';
-    const rIndexes = Object.entries(d.redis).filter(([k]) => k !== 'db_size').map(([k, v]) => `${k}: ${v ? `${v.num_docs} docs, ${v.algorithm || 'n/a'}` : 'n/a'}`).join('\\n');
+    const rIndexes = Object.entries(d.redis).filter(([k]) => k !== 'db_size').map(([k, v]) => `${k}: ${v ? `${v.num_docs} docs, ${v.algorithm || 'n/a'}` : 'n/a'}`).join('\n');
     el('rq').textContent = rIndexes;
-    el('oq').textContent = d.postgres.indexes.map((i) => i.def).join('\\n');
-    el('rbody').innerHTML = `<div class="empty">${Object.keys(d.redis).length - 1} indexes + the semantic router — see query pane</div>`;
+    el('oq').textContent = d.postgres.indexes.map((i) => i.def).join('\n');
+    el('rbody').innerHTML = `<div class="empty">${Object.keys(d.redis).length - 1} indexes + the semantic router — listed above, in the box under "Redis"</div>`;
     el('obody').replaceChildren(rowsToTable(d.postgres.indexes.map((i) => ({ index: i.name })), [['Index', 'index']]));
     el('bars').replaceChildren();
     el('method').innerHTML = 'Live schema introspection: RedisVL indexes (FT.INFO) on the left, Postgres indexes (pg_indexes) on the right.';

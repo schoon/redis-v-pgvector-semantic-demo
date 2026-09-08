@@ -136,6 +136,19 @@ looked plausible, not obviously broken.
 
 ## Other things not to "clean up"
 
+**Watch for doubled backslashes (`\\n`, `\\'`) in `public/index.html` —
+they've broken this file twice.** A `\\n` where JS needs `\n` doesn't
+error; it silently produces the two visible characters `\n` instead of
+a line break (found in `runArchitecture()`'s index list — this is what
+made "see query pane" look like garbled text instead of a readable
+list). A `\\'` where JS needs `\'` is worse — it terminates the string
+early and throws a `SyntaxError` that silently breaks every tab's
+rendering (found once already in this file). If you hand-write escaped
+quotes or newlines into this file, grep for `\\\\[nrt'"]` afterward and
+load the page in a browser — a passing `ast.parse`/lint pass in Python
+files doesn't catch either failure mode, since both are perfectly valid
+JS strings that just aren't the string you meant.
+
 **RedisVL query results always include an `id` key of their own — the
 full Redis key (e.g. `tx::T00000114`) — regardless of `return_fields`.**
 This is why every schema in `redis_store.py` names its own identifier
