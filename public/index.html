@@ -27,7 +27,7 @@
   .landing .cta { margin-top: 1.8rem; }
   .landing .cta button { font-size: 1rem; padding: 0.8rem 1.8rem; border-radius: 10px; border: none; background: var(--redis); color: white; font-weight: 600; cursor: pointer; }
   .landing .cta button:hover { opacity: 0.92; }
-  .landing .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.9rem; margin: 2.2rem 0; text-align: left; }
+  .landing .feature-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 2.2rem 0; text-align: left; }
   .landing .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem 1rem; }
   .landing .card h3 { font-size: 0.85rem; margin: 0 0 0.4rem; }
   .landing .card p { font-size: 0.8rem; margin: 0; }
@@ -73,7 +73,7 @@
 
   .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
   .panes[hidden] { display: none; }
-  @media (max-width: 860px) { .panes { grid-template-columns: 1fr; } .summary { grid-template-columns: 1fr; } .landing .grid3 { grid-template-columns: 1fr; } }
+  @media (max-width: 860px) { .panes { grid-template-columns: 1fr; } .summary { grid-template-columns: 1fr; } .landing .feature-grid { grid-template-columns: 1fr; } }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .pane h2 { margin: 0; padding: 0.7rem 0.9rem; font-size: 0.85rem; font-weight: 600; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
   .pane.redis h2 { color: var(--redis); }
@@ -118,10 +118,11 @@
       over a fictitious credit-card company's transactions, card products,
       and support FAQ. Same corpus, same embeddings, same questions.
     </p>
-    <div class="grid3">
+    <div class="feature-grid">
       <div class="card"><h3>Vector search</h3><p>Exact (FLAT/KNN) and approximate (HNSW) nearest-neighbor search over 40,000 embedded transactions.</p></div>
       <div class="card"><h3>Semantic search</h3><p>Natural-language search over card products and FAQ articles, combined with category/fee filters in one query.</p></div>
-      <div class="card"><h3>Semantic routing</h3><p>RedisVL's built-in SemanticRouter vs a hand-rolled pgvector equivalent, classifying customer questions into support intents.</p></div>
+      <div class="card"><h3>Semantic caching</h3><p>RedisVL's SemanticCache vs Postgres, which has no caching layer and recomputes every single call.</p></div>
+      <div class="card"><h3>Semantic routing</h3><p>RedisVL's built-in SemanticRouter vs a hand-rolled pgvector equivalent — routes straight into the matching search.</p></div>
     </div>
     <div class="cta"><button id="enterDemo">Enter demo →</button></div>
     <p style="font-size:0.75rem; margin-top:2rem;">No real customer or transaction data of any kind. See <a href="https://github.com/schoon/redis-v-pgvector-semantic-demo/blob/main/docs/METHODOLOGY.md">Methodology</a>.</p>
@@ -267,17 +268,30 @@
   });
   el('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
   el('runs').addEventListener('change', search);
-  el('semCorpus').addEventListener('change', search);
+  el('semCorpus').addEventListener('change', () => { populateCategoryOptions(); search(); });
   el('semCategory').addEventListener('change', search);
   el('semMaxFee').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
   el('cacheRepeats').addEventListener('change', search);
 
+  // Card products and FAQ articles use two completely different category
+  // taxonomies (see generate.py's CARD_PRODUCT_CATALOG vs FAQ_CATALOG) —
+  // categories are fixed, so hand-rolled here rather than adding an
+  // endpoint just to enumerate them, but they MUST be repopulated when
+  // the corpus dropdown changes. Leaving product categories showing while
+  // "FAQ articles" is selected lets you pick a category that matches zero
+  // FAQ articles, which silently returns an empty result on both engines
+  // — not a search bug, but from the UI it looks exactly like one.
+  const PRODUCT_CATEGORIES = ['Cash Back', 'Travel', 'Student', 'Business', 'Low Rate', 'Building Credit', 'Premium'];
+  const FAQ_CATEGORIES = ['Disputes', 'Fraud', 'Statements', 'Fees', 'Credit Limit', 'Rewards', 'Payments', 'Account Management', 'Security'];
+
+  function populateCategoryOptions() {
+    const cats = el('semCorpus').value === 'faq' ? FAQ_CATEGORIES : PRODUCT_CATEGORIES;
+    const select = el('semCategory');
+    select.replaceChildren(new Option('any', ''), ...cats.map((c) => new Option(c, c)));
+  }
+
   async function loadDropdowns() {
-    const products = await (await fetch('/api/architecture')).json().catch(() => null);
-    // categories are fixed; keep this simple and hand-rolled rather than
-    // adding an endpoint just to enumerate them
-    const cats = ['Cash Back', 'Travel', 'Student', 'Business', 'Low Rate', 'Building Credit', 'Premium'];
-    el('semCategory').append(...cats.map((c) => { const o = document.createElement('option'); o.value = c; o.textContent = c; return o; }));
+    populateCategoryOptions();
   }
 
   function setVerdict(redisVal, postgresVal, { lowerIsBetter = true, matchOk = true, mismatchLabel = '' } = {}) {
@@ -417,15 +431,22 @@
     const d = await (await fetch(`/api/semantic-cache?${params}`)).json();
     if (stale()) return;
     el('q').value = query;
-    el('rt').textContent = `${d.redis.repeat_avg_ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.repeat_avg_ms.toFixed(3)} ms`;
-    el('rsub').textContent = `avg of ${d.repeats - 1} repeat calls · first call ${d.redis.first_ms.toFixed(3)} ms`;
-    el('osub').textContent = `avg of ${d.repeats - 1} repeat calls · first call ${d.postgres.first_ms.toFixed(3)} ms`;
-    setVerdict(d.redis.repeat_avg_ms, d.postgres.repeat_avg_ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
+    const noRepeats = d.redis.repeat_avg_ms == null;
+    if (noRepeats) {
+      el('rt').textContent = `${d.redis.first_ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.first_ms.toFixed(3)} ms`;
+      el('rsub').textContent = 'single call (no repeats simulated)'; el('osub').textContent = 'single call (no repeats simulated)';
+      setVerdict(0, 0, { matchOk: false, mismatchLabel: 'simulate 2+ to see a repeat-traffic average' });
+    } else {
+      el('rt').textContent = `${d.redis.repeat_avg_ms.toFixed(3)} ms`; el('ot').textContent = `${d.postgres.repeat_avg_ms.toFixed(3)} ms`;
+      el('rsub').textContent = `avg of ${d.repeats - 1} repeat calls · first call ${d.redis.first_ms.toFixed(3)} ms`;
+      el('osub').textContent = `avg of ${d.repeats - 1} repeat calls · first call ${d.postgres.first_ms.toFixed(3)} ms`;
+      setVerdict(d.redis.repeat_avg_ms, d.postgres.repeat_avg_ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
+    }
     el('rcount').textContent = ''; el('ocount').textContent = '';
     el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
     el('rbody').replaceChildren(callLogTable(d.calls, 'redis'));
     el('obody').replaceChildren(callLogTable(d.calls, 'postgres'));
-    renderBars(d.redis.repeat_avg_ms, d.postgres.repeat_avg_ms);
+    renderBars(noRepeats ? d.redis.first_ms : d.redis.repeat_avg_ms, noRepeats ? d.postgres.first_ms : d.postgres.repeat_avg_ms);
     el('method').innerHTML = `Simulating ${d.repeats} people asking the same (or a near-duplicate) question. Redis checks its SemanticCache first — call 1 misses and populates it, every call after that hits and never touches <code>tx_flat_idx</code>. Postgres has no caching layer, so it re-runs the full exact search every single call — there is no "first vs. repeat" distinction on that side, by design. The cache is cleared before this simulation starts so call 1 is a genuine miss.`;
   }
 
@@ -445,7 +466,7 @@
     const dist = document.createElement('div'); dist.className = 'dist';
     dist.textContent = match.distance == null ? '' : `cosine distance: ${match.distance.toFixed(4)}`;
     card.append(dist);
-    if (match.search_target && match.search_result) {
+    if (match.search_target && match.search_result && match.search_result.length) {
       const label = document.createElement('div'); label.className = 'action';
       label.style.marginTop = '0.6rem';
       const corpusName = match.search_target === 'products' ? 'card products' : 'FAQ articles';

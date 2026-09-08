@@ -148,18 +148,23 @@ def semantic_cache_demo(query: str = "coffee shop purchases", limit: int = 8, re
         p_rows, p_ms, p_query = pgs.vector_search_flat(pg_conn, query, limit=limit)
         calls.append({"i": i, "redis_ms": r_ms, "redis_hit": r_hit, "redis_desc": r_desc, "postgres_ms": p_ms})
 
-    repeat_calls = calls[1:] if n > 1 else calls
+    # With repeats=1 there were no repeat calls at all — reporting the
+    # single (miss) call's latency as "repeat average" would silently
+    # relabel a cache-miss cost as if it reflected the cache-hit
+    # benefit, which is the whole point of this scenario. null it out
+    # instead and let the frontend say so explicitly.
+    repeat_calls = calls[1:]
     return {
         "query": query, "repeats": n, "calls": calls,
         "redis": {
             "rows": r_rows, "query": r_desc,
             "first_ms": calls[0]["redis_ms"],
-            "repeat_avg_ms": statistics.mean(c["redis_ms"] for c in repeat_calls),
+            "repeat_avg_ms": statistics.mean(c["redis_ms"] for c in repeat_calls) if repeat_calls else None,
         },
         "postgres": {
             "rows": p_rows, "query": p_query,
             "first_ms": calls[0]["postgres_ms"],
-            "repeat_avg_ms": statistics.mean(c["postgres_ms"] for c in repeat_calls),
+            "repeat_avg_ms": statistics.mean(c["postgres_ms"] for c in repeat_calls) if repeat_calls else None,
         },
         "countsMatch": len(r_rows) == len(p_rows),
     }
