@@ -1,10 +1,16 @@
 """
-Generates the whole synthetic corpus: customers, their credit cards,
-transactions on those cards, the credit card product catalog, and a set of
-support FAQ articles.
+Generates the whole synthetic corpus: customers, the operational requests
+filed against their identity records, the procedure catalog case workers
+follow, and a set of standard-operating-procedure (SOP) knowledge base
+articles.
 
-Every name, merchant, and note below is fabricated. Nothing here is drawn
-from or resembles a real institution's data or a real customer's data.
+Every name and case note below is fabricated. Nothing here is drawn from
+or resembles a real institution's data or a real customer's data. The
+scenario is modeled on a bank's customer identity operations team — the
+group that keeps customer identity records accurate and compliant: address
+updates, duplicate TIN/SSN resolution, and related customer-data
+maintenance and due-diligence work — but the bank, its customers, and
+every case are invented for this demo.
 """
 
 import datetime
@@ -12,7 +18,7 @@ import json
 import os
 import random
 
-from config import CARD_PRODUCTS, CARDS_PER_CUSTOMER_RANGE, CUSTOMERS, DATA_DIR, DATA_FILES, FAQ_ARTICLES, SEED, TRANSACTIONS
+from config import CUSTOMERS, DATA_DIR, DATA_FILES, PROCEDURES, REQUESTS, SEED, SOP_ARTICLES
 
 rng = random.Random(SEED)
 
@@ -40,161 +46,190 @@ LAST_NAMES = [
     "Thomas", "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson", "White",
 ]
 
-# Each category carries its own merchant pool and a handful of description
-# templates, so embeddings cluster meaningfully by category — the whole
-# point of a vector search demo is that "coffee shop purchases" and "hotel
-# charges" land in genuinely different neighborhoods of the vector space,
-# not that the text is realistic prose.
-CATEGORIES = {
-    "Coffee Shops": {
-        "merchants": ["Blue Bottle Coffee", "Corner Cafe", "Daily Grind Coffee", "Roast House", "Steam & Bean"],
-        "templates": ["Coffee and pastry at {m}", "Morning coffee run at {m}", "Latte and breakfast sandwich at {m}"],
+# Each request type carries its own intake-channel pool and a handful of
+# case-note templates, so embeddings cluster meaningfully by type — the
+# whole point of a vector search demo is that "address change requests"
+# and "duplicate TIN cases" land in genuinely different neighborhoods of
+# the vector space, not that the text is realistic case-management prose.
+REQUEST_TYPES = {
+    "Address Update": {
+        "channels": ["Branch - Downtown", "Online Portal", "Phone Banking", "Relationship Manager", "Mail"],
+        "templates": [
+            "Customer submitted a change of mailing address via {m}",
+            "Updated home address on file following a move, submitted via {m}",
+            "Address correction requested through {m} after mail was returned undeliverable",
+        ],
     },
-    "Dining": {
-        "merchants": ["Olive Branch Bistro", "Golden Wok", "Riverside Grill", "Taco Verde", "The Hungry Fork"],
-        "templates": ["Dinner for two at {m}", "Lunch order at {m}", "Weekend brunch at {m}"],
+    "Duplicate TIN Resolution": {
+        "channels": ["Compliance Queue", "Data Quality Review", "Branch - Downtown", "Back Office Ops"],
+        "templates": [
+            "Two customer profiles found sharing the same TIN, flagged via {m} for merge review",
+            "Duplicate SSN detected between two open accounts during {m} review",
+            "TIN conflict identified by {m}, pending resolution",
+        ],
     },
-    "Groceries": {
-        "merchants": ["Green Valley Market", "Sunrise Grocers", "Metro Foods", "Harvest Basket", "Corner Pantry"],
-        "templates": ["Weekly grocery shopping at {m}", "Produce and household items at {m}", "Grocery pickup order at {m}"],
+    "TIN/SSN Correction": {
+        "channels": ["Online Portal", "Branch - Downtown", "Phone Banking", "Mail"],
+        "templates": [
+            "Customer reported an incorrect SSN on file, correction requested via {m}",
+            "TIN mismatch with IRS records found during {m} review, correction submitted",
+        ],
     },
-    "Travel - Airlines": {
-        "merchants": ["Skyline Airlines", "Continental Wings", "Horizon Air", "Blue Sky Airways"],
-        "templates": ["Round-trip flight booked on {m}", "Airline ticket change fee, {m}", "Checked bag fee, {m}"],
+    "Beneficial Ownership Update": {
+        "channels": ["Relationship Manager", "Compliance Queue", "Branch - Downtown"],
+        "templates": [
+            "Business customer submitted updated beneficial ownership information via {m}",
+            "Change in beneficial owner reported through {m}, documentation pending",
+        ],
     },
-    "Travel - Hotels": {
-        "merchants": ["Harborview Hotel", "Cascade Inn & Suites", "Union Square Hotel", "Lakeside Resort"],
-        "templates": ["Two-night hotel stay at {m}", "Hotel room and resort fee, {m}", "Extended stay at {m}"],
+    "Identity Verification Refresh": {
+        "channels": ["Online Portal", "Branch - Downtown", "Phone Banking"],
+        "templates": [
+            "Periodic identity verification refresh initiated via {m}",
+            "Customer asked to re-verify identity documents through {m} after an expired ID",
+        ],
     },
-    "Ride Share": {
-        "merchants": ["QuickRide", "CityHail", "GoCar"],
-        "templates": ["Ride from airport via {m}", "Evening ride home via {m}", "Cross-town ride via {m}"],
+    "Due Diligence Refresh": {
+        "channels": ["Compliance Queue", "Relationship Manager", "Back Office Ops"],
+        "templates": [
+            "Scheduled due-diligence refresh review opened via {m}",
+            "Enhanced due diligence triggered by {m} following a risk-rating change",
+        ],
     },
-    "Streaming & Subscriptions": {
-        "merchants": ["StreamVue", "MelodyStream", "CloudBox Storage", "NewsDaily Digital"],
-        "templates": ["Monthly subscription charge, {m}", "Annual renewal, {m}", "Streaming plan upgrade, {m}"],
+    "Deceased Customer Processing": {
+        "channels": ["Branch - Downtown", "Phone Banking", "Mail"],
+        "templates": [
+            "Next of kin notified the bank of customer's passing via {m}, estate processing opened",
+            "Death certificate received through {m}, account flagged for estate handling",
+        ],
     },
-    "Utilities": {
-        "merchants": ["Metro Power & Light", "CityWater Utility", "Northgate Gas Co."],
-        "templates": ["Monthly utility bill, {m}", "Autopay utility payment, {m}"],
+    "Name Change": {
+        "channels": ["Branch - Downtown", "Online Portal", "Mail"],
+        "templates": [
+            "Customer requested a legal name change update via {m} following marriage",
+            "Name correction submitted through {m} with supporting legal documentation",
+        ],
     },
-    "Online Shopping": {
-        "merchants": ["ShopWave", "BrightBasket Online", "QuickCart"],
-        "templates": ["Online order from {m}", "Household goods order, {m}", "Return and exchange, {m}"],
+    "Account/Profile Merge Review": {
+        "channels": ["Data Quality Review", "Compliance Queue", "Back Office Ops"],
+        "templates": [
+            "Two customer profiles flagged as possible duplicates by {m}, pending merge review",
+            "Automated matching flagged a possible duplicate profile via {m}",
+        ],
     },
-    "Electronics": {
-        "merchants": ["CircuitPoint Electronics", "ByteHouse", "GadgetWorks"],
-        "templates": ["Laptop accessory purchase at {m}", "Home electronics purchase at {m}"],
+    "Tax Document Correction": {
+        "channels": ["Online Portal", "Phone Banking", "Mail"],
+        "templates": [
+            "Customer requested a corrected 1099 due to a TIN error, submitted via {m}",
+            "Tax form reissue requested through {m} after a name mismatch",
+        ],
     },
-    "Home Improvement": {
-        "merchants": ["Hammer & Nail Supply", "GreenThumb Garden Center", "BuildRight Hardware"],
-        "templates": ["Home repair supplies at {m}", "Garden and patio purchase at {m}"],
+    "Case Status Inquiry": {
+        "channels": ["Phone Banking", "Online Portal", "Branch - Downtown"],
+        "templates": [
+            "Customer called via {m} asking for an update on an open address change case",
+            "Status check on an open due-diligence case requested through {m}",
+        ],
     },
-    "Gas Stations": {
-        "merchants": ["Summit Fuel", "Roadway Gas & Go", "Pinnacle Petroleum"],
-        "templates": ["Fuel fill-up at {m}", "Gas station convenience purchase at {m}"],
-    },
-    "Pharmacy & Health": {
-        "merchants": ["Wellness Corner Pharmacy", "CareFirst Drugstore", "HealthMart Pharmacy"],
-        "templates": ["Prescription pickup at {m}", "Over-the-counter purchase at {m}"],
-    },
-    "Entertainment": {
-        "merchants": ["Downtown Cinema", "Riverside Theater", "GameZone Arcade"],
-        "templates": ["Movie tickets at {m}", "Weekend outing at {m}"],
-    },
-    "Fitness": {
-        "merchants": ["PeakForm Gym", "Riverside Yoga Studio", "IronWorks Fitness"],
-        "templates": ["Monthly gym membership, {m}", "Drop-in class fee, {m}"],
+    "Escalation Request": {
+        "channels": ["Relationship Manager", "Compliance Queue", "Phone Banking"],
+        "templates": [
+            "Customer asked to escalate an unresolved TIN dispute via {m}",
+            "Case escalated to compliance by {m} after missed SLA",
+        ],
     },
 }
-CATEGORY_NAMES = list(CATEGORIES.keys())
+REQUEST_TYPE_NAMES = list(REQUEST_TYPES.keys())
 
-CARD_PRODUCT_CATALOG = [
-    {"name": "Everyday Cash Rewards Card", "category": "Cash Back", "annual_fee": 0, "apr_range": "18.99%-27.99%",
-     "description": "Earn 3% cash back on groceries and dining, 1% on everything else, with no annual fee. A solid everyday card for households that spend most of their budget on groceries and restaurants and don't want to track rotating categories."},
-    {"name": "Travel Elite Card", "category": "Travel", "annual_fee": 395, "apr_range": "19.99%-26.99%",
-     "description": "Premium travel rewards card earning 5x points on flights and hotels booked through our travel portal, airport lounge access, and no foreign transaction fees. Best suited for frequent travelers who can offset the annual fee with lounge access and travel credits."},
-    {"name": "Student Starter Card", "category": "Student", "annual_fee": 0, "apr_range": "22.99%-29.99%",
-     "description": "A first credit card for students building credit history, with a low starting credit limit, free credit score monitoring, and cash back on streaming subscriptions and food delivery. No annual fee and no credit history required to apply."},
-    {"name": "Business Rewards Card", "category": "Business", "annual_fee": 95, "apr_range": "18.99%-25.99%",
-     "description": "Designed for small business owners: 2% cash back on office supplies and software subscriptions, employee cards at no extra cost, and expense-tracking tools built into the mobile app."},
-    {"name": "Low Rate Card", "category": "Low Rate", "annual_fee": 0, "apr_range": "14.99%-19.99%",
-     "description": "One of our lowest ongoing APRs, aimed at cardholders who sometimes carry a balance month to month rather than paying in full. No rewards program, no annual fee, and a 0% introductory APR on balance transfers for the first 15 months."},
-    {"name": "Premium Travel Card", "category": "Travel", "annual_fee": 550, "apr_range": "19.99%-26.99%",
-     "description": "Our top-tier travel card: 10x points on hotels and rental cars, a yearly travel credit that offsets the annual fee, airport lounge membership, and trip delay and baggage insurance included."},
-    {"name": "Secured Credit Builder Card", "category": "Building Credit", "annual_fee": 0, "apr_range": "24.99%",
-     "description": "A secured card backed by a refundable security deposit, built for customers rebuilding or establishing credit. Reports to all three credit bureaus monthly and automatically reviews for an unsecured upgrade after 12 months of on-time payments."},
-    {"name": "Grocery & Dining Rewards Card", "category": "Cash Back", "annual_fee": 0, "apr_range": "18.99%-27.99%",
-     "description": "4% cash back at grocery stores and restaurants, 1% on everything else. No annual fee and no rotating categories to track — the two categories that earn extra are fixed."},
-    {"name": "Gas Rewards Card", "category": "Cash Back", "annual_fee": 0, "apr_range": "19.99%-27.99%",
-     "description": "5% cash back at gas stations, 2% at grocery stores, 1% on everything else. A strong fit for households with a long commute or frequent road trips."},
-    {"name": "Balance Transfer Card", "category": "Low Rate", "annual_fee": 0, "apr_range": "16.99%-24.99%",
-     "description": "0% introductory APR on balance transfers for 21 months with a low balance transfer fee, aimed at customers consolidating higher-rate credit card debt from other issuers."},
-    {"name": "Small Business Card", "category": "Business", "annual_fee": 0, "apr_range": "17.99%-25.99%",
-     "description": "No annual fee business card with 1.5% flat cash back on every purchase, year-end spending summaries for tax season, and no preset spending limit review required."},
-    {"name": "Airline Co-Branded Card", "category": "Travel", "annual_fee": 99, "apr_range": "19.99%-26.99%",
-     "description": "Earn a free checked bag, priority boarding, and 2x miles on our partner airline, plus a companion fare certificate each account anniversary. Best for customers loyal to one specific airline."},
-    {"name": "Hotel Co-Branded Card", "category": "Travel", "annual_fee": 95, "apr_range": "19.99%-26.99%",
-     "description": "Automatic elite status with our partner hotel chain, a free night certificate each year, and 5x points on stays at that chain. Best for customers who consistently book the same hotel brand."},
-    {"name": "Cashback Flat-Rate Card", "category": "Cash Back", "annual_fee": 0, "apr_range": "18.99%-27.99%",
-     "description": "The simplest rewards card we offer: 2% cash back on absolutely everything, no categories, no caps, no annual fee. Built for customers who don't want to think about which card earns more where."},
-    {"name": "Premium Metal Card", "category": "Premium", "annual_fee": 695, "apr_range": "19.99%-26.99%",
-     "description": "Our most exclusive card: a metal card body, dedicated concierge service, the highest travel credit we offer, and access to invitation-only events. Intended for high-spending customers who value service and status over any single rewards category."},
+# Category taxonomy is shared between the procedure catalog and the SOP
+# knowledge base (the same rough groupings a case worker would file both
+# under), but each corpus's rows and descriptions are independent.
+PROCEDURE_CATALOG = [
+    {"name": "Standard Address Change - Individual Customer", "category": "Address Maintenance", "sla_days": 1,
+     "description": "Update a mailing or residential address for an individual customer once submitted through any channel with the customer's identity confirmed. No supporting documentation required unless the new address is outside the customer's stated state of residence, in which case a secondary ID check is triggered."},
+    {"name": "Address Change - Business Customer", "category": "Address Maintenance", "sla_days": 3,
+     "description": "Update the registered or mailing address for a business account. Requires confirmation from an authorized signer and, for a change of registered agent address, an updated formation document on file."},
+    {"name": "Duplicate TIN Merge Review", "category": "TIN/SSN Resolution", "sla_days": 10,
+     "description": "Resolve two customer profiles that share the same TIN or SSN. Compliance reviews both profiles' request history and identity documents before deciding whether to merge the records or correct one profile's TIN."},
+    {"name": "TIN/SSN Correction", "category": "TIN/SSN Resolution", "sla_days": 5,
+     "description": "Correct a customer's TIN or SSN on file after a mismatch with IRS or SSA records is identified. Requires a copy of the customer's Social Security card or IRS-issued TIN confirmation letter."},
+    {"name": "Beneficial Ownership Certification Update", "category": "Beneficial Ownership", "sla_days": 15,
+     "description": "Collect and file an updated beneficial ownership certification for a business account after a change in ownership structure, in line with the bank's customer due-diligence program."},
+    {"name": "Identity Document Refresh", "category": "Identity Verification", "sla_days": 7,
+     "description": "Re-verify a customer's government-issued identification after it expires or is flagged during a periodic review. The account is placed under a soft restriction until a valid document is received."},
+    {"name": "Enhanced Due Diligence Review", "category": "Due Diligence", "sla_days": 30,
+     "description": "A deeper review triggered by a risk-rating change, high-risk jurisdiction activity, or a periodic schedule for higher-risk customer segments. Includes a source-of-funds review and a supervisor sign-off before the account's risk rating is updated."},
+    {"name": "Standard Due-Diligence Refresh", "category": "Due Diligence", "sla_days": 20,
+     "description": "The routine periodic refresh of a customer's due-diligence file — confirming current employment, address, and expected account activity remain consistent with the customer's risk profile."},
+    {"name": "Deceased Customer Account Processing", "category": "Estate Processing", "sla_days": 20,
+     "description": "Process the accounts of a deceased customer once a death certificate is received: restrict the account from further transactions, notify any joint holders, and route remaining balances per the estate's instructions or applicable state law."},
+    {"name": "Legal Name Change Processing", "category": "Documentation", "sla_days": 5,
+     "description": "Update a customer's legal name on file after marriage, divorce, or a court order, once supporting legal documentation is received and matched against the customer's identity file."},
+    {"name": "Duplicate Profile Merge Review", "category": "Documentation", "sla_days": 10,
+     "description": "Review two customer profiles flagged as likely duplicates by automated matching. If confirmed, the profiles are merged under the older account and the duplicate is closed with a note in the audit trail."},
+    {"name": "Tax Document Reissue", "category": "Documentation", "sla_days": 5,
+     "description": "Reissue a 1099 or other tax document after a correction to the customer's name or TIN, once the underlying identity record has already been corrected."},
+    {"name": "Compliance Escalation Review", "category": "Escalations", "sla_days": 3,
+     "description": "A supervisor-level review for a case that missed its original service-level target or where the customer has asked to escalate beyond front-line staff."},
+    {"name": "Address Verification Hold Release", "category": "Address Maintenance", "sla_days": 2,
+     "description": "Release a temporary hold placed on an account after an address change to a high-risk region, once a secondary identity check confirms the change is legitimate."},
+    {"name": "Joint Account Holder Identity Update", "category": "Identity Verification", "sla_days": 7,
+     "description": "Update the identity record for a secondary or joint account holder, including a fresh identity verification if their information was never independently confirmed at account opening."},
 ]
 
-FAQ_CATALOG = [
-    ("Disputes", "How do I dispute a charge on my statement?",
-     "If you don't recognize a charge or believe it's incorrect, you can open a dispute from the transaction detail screen in the mobile app or by calling the number on the back of your card. Most disputes are resolved within 10 business days, and the disputed amount is temporarily credited to your account while we investigate."),
-    ("Disputes", "How long does a dispute investigation take?",
-     "Under federal regulations, we have up to 90 days to complete a dispute investigation for most transactions, though the large majority resolve within 10 business days. You'll receive written notice of the outcome either way."),
-    ("Disputes", "What happens if I lose a dispute?",
-     "If the investigation finds the charge was valid, the temporary credit is reversed and the charge is added back to your balance. You'll receive an explanation of the findings and can request the documentation we used to reach that decision."),
-    ("Fraud", "How do I report a lost or stolen card?",
-     "Report a lost or stolen card immediately through the mobile app's 'Lock Card' feature, which blocks new transactions instantly, or by calling our 24/7 fraud line. We'll issue a replacement card with a new number, typically arriving within 3-5 business days."),
-    ("Fraud", "Am I liable for fraudulent charges on my account?",
-     "You are not liable for fraudulent charges reported promptly, consistent with federal law. We monitor for unusual activity automatically and will text or call you if a transaction looks out of pattern."),
-    ("Fraud", "What should I do if I suspect identity theft?",
-     "Freeze your card in the app immediately, then contact our fraud team so we can review recent activity and, if needed, close and reissue the account with a new number. We also recommend placing a fraud alert with the major credit bureaus."),
-    ("Statements", "When is my statement generated each month?",
-     "Your statement closes on the same day each month, shown as your 'statement date' in account settings. You can view current-cycle activity at any time in the app even before the statement closes."),
-    ("Statements", "Why does my statement balance differ from my current balance?",
-     "Your statement balance is a snapshot as of your last statement closing date. Your current balance includes any purchases or payments made since then, which is why the two numbers rarely match exactly."),
-    ("Statements", "Can I get paper statements mailed to me?",
-     "Yes, paper statements can be enabled in account settings, though there may be a small monthly fee depending on your card product. Electronic statements are always free and available for at least 7 years in the app."),
-    ("Fees", "What is a foreign transaction fee and which cards charge it?",
-     "A foreign transaction fee is typically 2-3% of the purchase amount charged when you use your card for a transaction processed in a foreign currency. Our Travel Elite Card and Premium Travel Card waive this fee entirely; most other cards in our lineup charge 3%."),
-    ("Fees", "What triggers a late payment fee?",
-     "A late fee applies if we don't receive at least the minimum payment by the due date shown on your statement. Setting up autopay for at least the minimum payment is the most reliable way to avoid this."),
-    ("Fees", "Is there a fee for going over my credit limit?",
-     "We do not charge an over-limit fee. Transactions that would exceed your credit limit may simply be declined unless you've opted in to over-limit coverage for a specific card product."),
-    ("Credit Limit", "How can I request a credit limit increase?",
-     "You can request a credit limit increase in the app under Card Settings, which triggers a soft credit check that does not affect your credit score. Some requests are approved instantly; others may require additional income verification."),
-    ("Credit Limit", "Will requesting a credit limit increase hurt my credit score?",
-     "Most credit limit increase requests use a soft inquiry, which does not affect your score. In rare cases involving a significant increase, we may perform a hard inquiry, and we'll always disclose that before proceeding."),
-    ("Credit Limit", "Why was my credit limit decreased?",
-     "Credit limits are periodically reviewed based on payment history, reported income, and overall credit utilization across all your accounts. If your limit is reduced, we send a notice explaining the primary factors that led to the decision."),
-    ("Rewards", "How do cash back rewards get paid out?",
-     "Cash back accrues automatically as you spend and can be redeemed at any time as a statement credit, direct deposit, or gift card, depending on your card product. There's no minimum redemption amount on most cards."),
-    ("Rewards", "Do rewards points expire?",
-     "Points earned on our travel cards do not expire as long as your account remains open and in good standing. Cash back on everyday cards also does not expire under the same condition."),
-    ("Rewards", "Can I transfer points between accounts?",
-     "Points can be transferred to another cardholder on the same account type, or to a partner airline or hotel program at the redemption rates shown in the rewards portal."),
-    ("Payments", "What happens if I miss a payment?",
-     "A missed payment may result in a late fee and can affect your credit score if it's more than 30 days past due. We recommend contacting us before a due date if you expect to have trouble paying, since hardship options may be available."),
-    ("Payments", "Can I change my payment due date?",
-     "Yes, you can request a new due date once every 12 months in account settings, subject to a brief processing window before the new date takes effect."),
-    ("Payments", "How do autopay minimum vs. full balance options work?",
-     "Autopay can be set to pay the minimum due, the full statement balance, or a fixed amount you choose, withdrawn automatically a few days before your due date. You can change or cancel autopay at any time before the withdrawal is scheduled."),
-    ("Account Management", "How do I close my credit card account?",
-     "You can request account closure through the app or by phone once your balance is paid in full. Closing an account may affect your credit utilization ratio and the average age of your accounts, both of which factor into your credit score."),
-    ("Account Management", "Can I add an authorized user to my account?",
-     "Yes, authorized users can be added in account settings at no cost on most card products. Authorized users get their own card but are not responsible for the account's payment obligations."),
-    ("Account Management", "How do I update my mailing address or phone number?",
-     "Contact information can be updated directly in the app under Profile Settings, and changes take effect immediately for statements and fraud alerts."),
-    ("Security", "How does the mobile app protect my account?",
-     "The app supports biometric login, real-time purchase alerts, and one-tap card freezing. We also use behavioral fraud monitoring that can flag and hold suspicious transactions before they post."),
-    ("Security", "Is it safe to use my card for online purchases?",
-     "Yes — you can generate a virtual card number for online purchases in the app, which limits exposure if a merchant's systems are ever compromised, since the virtual number can be turned off independently of your physical card."),
+SOP_CATALOG = [
+    ("Address Changes", "How do I update a customer's mailing address?",
+     "Address updates can be submitted through any channel — branch, phone, online portal, or mail — once the customer's identity has been confirmed. Standard changes complete within one business day; changes to a residential address outside the customer's stated state of residence trigger a secondary identity check first."),
+    ("Address Changes", "What happens if a customer's mail is returned as undeliverable?",
+     "An undeliverable-mail flag opens an address-verification case automatically. The account is not restricted, but statements switch to electronic-only until a confirmed current address is on file."),
+    ("Address Changes", "Can a business customer update its registered address online?",
+     "No — a business address change requires confirmation from an authorized signer and, if the registered agent address is changing, an updated formation document. Route it to a relationship manager rather than the self-service portal."),
+    ("TIN/SSN Issues", "What do I do if two customer profiles share the same TIN?",
+     "Open a Duplicate TIN Merge Review case. Compliance compares both profiles' identity documents and account history before deciding whether to merge the records into one profile or correct the TIN on one of them."),
+    ("TIN/SSN Issues", "A customer says their SSN is wrong on file — what's the process?",
+     "Request a copy of their Social Security card or an IRS TIN confirmation letter, then submit a TIN/SSN Correction case. The correction typically completes within 5 business days once the document is received."),
+    ("TIN/SSN Issues", "How long does a duplicate TIN resolution usually take?",
+     "The service-level target is 10 business days, though cases involving a full profile merge (rather than a single-field correction) can take longer if account history needs to be reconciled first."),
+    ("Beneficial Ownership", "When does a business customer need to recertify beneficial ownership?",
+     "Whenever there's a change in who owns 25% or more of the business, or who exercises significant control over it, and at minimum during the periodic due-diligence refresh cycle for that account."),
+    ("Beneficial Ownership", "What documentation is required for a beneficial ownership update?",
+     "A completed beneficial ownership certification form plus identity documentation for each newly reported beneficial owner. The service-level target is 15 business days."),
+    ("Beneficial Ownership", "Can beneficial ownership updates be submitted online?",
+     "Not currently — route these to a relationship manager or the compliance queue, since the certification form requires an authorized signer's signature."),
+    ("Due Diligence", "What triggers an enhanced due-diligence review?",
+     "A risk-rating change, activity in a high-risk jurisdiction, or reaching the periodic review point for a customer segment already rated higher risk. It includes a source-of-funds review and a supervisor sign-off."),
+    ("Due Diligence", "How is a standard due-diligence refresh different from enhanced due diligence?",
+     "A standard refresh simply confirms that employment, address, and expected account activity still match the customer's existing risk profile. Enhanced due diligence goes further, examining source of funds, and requires supervisor sign-off before the file closes."),
+    ("Due Diligence", "What happens if a customer doesn't respond to a due-diligence refresh request?",
+     "The case stays open past its service-level target and escalates to a supervisor review. Accounts are not restricted solely for a slow refresh response unless a separate risk flag is also present."),
+    ("Identity Verification", "What happens when a customer's ID expires?",
+     "The account is placed under a soft restriction — existing activity continues, but certain self-service changes are paused — until a current, valid identification document is received and an Identity Document Refresh case is closed."),
+    ("Identity Verification", "Does a joint account holder need to independently verify their identity?",
+     "Yes, if their information was never independently confirmed at account opening. Route this as a Joint Account Holder Identity Update case rather than treating it as part of the primary holder's file."),
+    ("Identity Verification", "How often is identity verification refreshed for an existing customer?",
+     "On the same periodic schedule as the customer's due-diligence refresh, unless an expired ID or a flagged review triggers it sooner."),
+    ("Estate Processing", "What's the first step when a customer has passed away?",
+     "Once a death certificate is received through any channel, open a Deceased Customer Account Processing case immediately — this restricts the account from further transactions and notifies any joint holders before anything else happens."),
+    ("Estate Processing", "Can a joint account holder still use the account after the other holder's death?",
+     "Typically yes, once the death certificate is on file and the case is processed — the surviving joint holder retains access, but the deceased customer's individual identity record is closed."),
+    ("Estate Processing", "How are remaining balances handled for a deceased customer with no joint holder?",
+     "Balances route according to the estate's instructions once provided by the executor, or per applicable state law if no instructions are on file. This case type has a 20 business day service-level target."),
+    ("Documentation", "What supporting documents are needed for a legal name change?",
+     "A marriage certificate, divorce decree, or court order, matched against the customer's existing identity file. The service-level target is 5 business days."),
+    ("Documentation", "How do I know if two customer profiles are true duplicates or just similar?",
+     "Automated matching flags likely duplicates based on name, TIN, and address overlap, but a person still reviews both profiles before merging. If confirmed, the older account is kept and the duplicate is closed with a note in the audit trail."),
+    ("Documentation", "Why would a customer need a corrected 1099?",
+     "Usually because their name or TIN was wrong on the original form. The underlying identity record has to be corrected first — the tax document reissue is a downstream step, not a fix on its own."),
+    ("Documentation", "What happens to the closed profile after a duplicate merge?",
+     "It stays in the system as a closed record with a note pointing to the surviving profile, so historical activity remains traceable for audit purposes even though the account itself is no longer active."),
+    ("Escalations", "When should a case be escalated to compliance?",
+     "When it's missed its original service-level target, or the customer explicitly asks to speak with someone beyond front-line staff. Escalations get a supervisor-level review within 3 business days."),
+    ("Escalations", "What's different about an escalated case versus a normal one?",
+     "A supervisor reviews the full case history and either resolves it directly or reassigns it with clearer instructions. The customer should also get a status update explaining the delay, not just a resolution."),
+    ("Escalations", "Can a customer request an escalation before the service-level target has passed?",
+     "Yes — the target is a maximum, not a promise that nothing can move faster. If there's a clear reason (a wire deadline, a closing date), note it on the case and flag it for early review."),
+    ("Case Management", "How can a customer check the status of an open case?",
+     "Through the online portal if they have a case reference number, or by phone banking, which can look up any open case tied to their identity record without needing the reference number."),
 ]
 
 
@@ -221,67 +256,46 @@ def generate_customers():
     return customers
 
 
-def generate_card_products():
-    products = []
-    for i, p in enumerate(CARD_PRODUCT_CATALOG[:CARD_PRODUCTS]):
-        products.append({
-            "product_id": f"P{i:03d}",
+def generate_procedures():
+    procedures = []
+    for i, p in enumerate(PROCEDURE_CATALOG[:PROCEDURES]):
+        procedures.append({
+            "procedure_id": f"P{i:03d}",
             "name": p["name"],
             "category": p["category"],
-            "annual_fee": p["annual_fee"],
-            "apr_range": p["apr_range"],
+            "sla_days": p["sla_days"],
             "description": p["description"],
         })
-    return products
+    return procedures
 
 
-def generate_cards(customers, products):
-    cards = []
-    card_seq = 0
-    for cust in customers:
-        n_cards = rng.randint(*CARDS_PER_CUSTOMER_RANGE)
-        for _ in range(n_cards):
-            product = rng_pick(products)
-            cards.append({
-                "card_id": f"CARD{card_seq:07d}",
-                "customer_id": cust["customer_id"],
-                "product_id": product["product_id"],
-                "opened_date": rand_date(1200, 10),
-                "credit_limit": rng.choice([1000, 2000, 5000, 7500, 10000, 15000, 20000, 30000]),
-                "current_balance": round(rng.uniform(0, 8000), 2),
-            })
-            card_seq += 1
-    return cards
-
-
-def generate_transactions(cards):
-    transactions = []
-    for i in range(TRANSACTIONS):
-        card = rng_pick(cards)
-        category = rng_pick(CATEGORY_NAMES)
-        cat = CATEGORIES[category]
-        merchant = rng_pick(cat["merchants"])
-        template = rng_pick(cat["templates"])
-        description = template.format(m=merchant)
-        amount = round(abs(rng.gauss(45, 60)) + 3, 2)
-        transactions.append({
-            "transaction_id": f"T{i:08d}",
-            "card_id": card["card_id"],
-            "customer_id": card["customer_id"],
-            "merchant": merchant,
-            "category": category,
-            "amount": amount,
+def generate_requests(customers):
+    requests = []
+    for i in range(REQUESTS):
+        customer = rng_pick(customers)
+        request_type = rng_pick(REQUEST_TYPE_NAMES)
+        rt = REQUEST_TYPES[request_type]
+        channel = rng_pick(rt["channels"])
+        template = rng_pick(rt["templates"])
+        description = template.format(m=channel)
+        days_open = rng.randint(0, 45)
+        requests.append({
+            "request_id": f"R{i:08d}",
+            "customer_id": customer["customer_id"],
+            "channel": channel,
+            "category": request_type,
+            "days_open": days_open,
             "date": rand_date(180, 0),
             "description": description,
         })
-    return transactions
+    return requests
 
 
-def generate_faq_articles():
+def generate_sop_articles():
     articles = []
-    for i, (category, title, body) in enumerate(FAQ_CATALOG[:FAQ_ARTICLES]):
+    for i, (category, title, body) in enumerate(SOP_CATALOG[:SOP_ARTICLES]):
         articles.append({
-            "article_id": f"FAQ{i:03d}",
+            "sop_id": f"SOP{i:03d}",
             "category": category,
             "title": title,
             "body": body,
@@ -303,25 +317,20 @@ def main():
     write_jsonl(DATA_FILES["customers"], customers)
     print(f"  {len(customers):,} customers")
 
-    print("Generating card products...")
-    products = generate_card_products()
-    write_jsonl(DATA_FILES["card_products"], products)
-    print(f"  {len(products):,} card products")
+    print("Generating procedure catalog...")
+    procedures = generate_procedures()
+    write_jsonl(DATA_FILES["procedures"], procedures)
+    print(f"  {len(procedures):,} procedures")
 
-    print("Generating cards...")
-    cards = generate_cards(customers, products)
-    write_jsonl(DATA_FILES["cards"], cards)
-    print(f"  {len(cards):,} cards")
+    print("Generating requests...")
+    requests = generate_requests(customers)
+    write_jsonl(DATA_FILES["requests"], requests)
+    print(f"  {len(requests):,} requests")
 
-    print("Generating transactions...")
-    transactions = generate_transactions(cards)
-    write_jsonl(DATA_FILES["transactions"], transactions)
-    print(f"  {len(transactions):,} transactions")
-
-    print("Generating FAQ articles...")
-    faqs = generate_faq_articles()
-    write_jsonl(DATA_FILES["faq_articles"], faqs)
-    print(f"  {len(faqs):,} FAQ articles")
+    print("Generating SOP articles...")
+    sops = generate_sop_articles()
+    write_jsonl(DATA_FILES["sop_articles"], sops)
+    print(f"  {len(sops):,} SOP articles")
 
 
 if __name__ == "__main__":

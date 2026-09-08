@@ -2,9 +2,12 @@
 
 Side-by-side **vector search**, **hybrid semantic search**, **semantic
 caching**, and **semantic intent routing** — **Redis (RedisVL)** vs
-**Postgres (pgvector)** — over a fictitious credit-card company's
-transactions, card products, and support FAQ, with per-query latency
-shown live.
+**Postgres (pgvector)** — over a fictitious bank's customer identity
+operations: the requests that keep customer identity records accurate
+and compliant (address updates, duplicate TIN/SSN resolution, and
+related customer-data maintenance and due-diligence work), a procedure
+catalog, and a support SOP knowledge base, with per-query latency shown
+live.
 
 > **Method and caveats live in [docs/METHODOLOGY.md](docs/METHODOLOGY.md).**
 > Read it before presenting — it covers two real HNSW bugs found while
@@ -18,8 +21,8 @@ shown live.
 > support (including a newer Redis primitive — Vector Sets — considered
 > and deliberately not used here).
 
-No real customer or transaction data of any kind — every ID, name, and
-number in the corpus is synthetic. See
+No real customer or case data of any kind — every ID, name, and number
+in the corpus is synthetic. See
 [Methodology](docs/METHODOLOGY.md#no-real-customer-data-anywhere).
 
 ## Quick start
@@ -78,20 +81,20 @@ verified against independently-computed ground truth — see
 
 ## Observed on one laptop
 
-**Measured 2026-09-08.** 40,000 embedded transactions, 15 card products,
-26 FAQ articles, 87 routing reference utterances. Redis 8 and Postgres
+**Measured 2026-09-08.** 40,000 embedded requests, 15 procedures,
+26 SOP articles, 87 routing reference utterances. Redis 8 and Postgres
 17 + pgvector 0.8.6, both in Docker on a 14-core Apple-silicon MacBook.
 Median of 3 runs per sample.
 
 | Scenario | Redis | Postgres | Winner |
 | -------- | ----- | -------- | ------ |
-| Vector search (exact) | 2.9–4.1 ms | 17.1–18.9 ms | **Redis, ~5–6×** |
-| Vector search (HNSW) | 1.0–1.4 ms | 0.4–1.5 ms | roughly even |
-| Semantic search — products | 0.8–1.1 ms | 0.6–0.9 ms | roughly even |
-| Semantic search — FAQ | 1.1–1.2 ms | 1.0–1.3 ms | roughly even |
-| Semantic caching — first call (miss) | 6.6–10.7 ms | 19.7–32.2 ms | **Redis, ~3×** |
-| Semantic caching — repeat calls (avg) | 0.8–1.2 ms | 16.7–27.3 ms | **Redis, ~18–20×** |
-| Semantic routing | 1.1–1.7 ms | 1.0–1.3 ms | roughly even |
+| Vector search (exact) | 4.7–8.1 ms | 17.8–19.7 ms | **Redis, ~2–4×** |
+| Vector search (HNSW) | 0.9–1.8 ms | 0.4–0.9 ms | roughly even |
+| Semantic search — procedures | 0.7–0.9 ms | 0.5–0.7 ms | roughly even |
+| Semantic search — SOP | 0.7–1.1 ms | 0.4–1.0 ms | roughly even |
+| Semantic caching — first call (miss) | 4.1–7.9 ms | 15.2–25.4 ms | **Redis, ~2–6×** |
+| Semantic caching — repeat calls (avg) | 0.7–0.8 ms | 15.7–18.7 ms | **Redis, ~19–28×** |
+| Semantic routing | 0.8–0.9 ms | 0.7–1.1 ms | roughly even |
 
 **A real measurement bug used to make routing look much worse than it
 is — worth naming, not just quietly fixing.** An earlier version of
@@ -110,8 +113,8 @@ sitting in the numbers unnoticed until directly profiled.
 
 **HNSW is a genuine, small, roughly-even result, not a bug.** Both
 engines' HNSW result matches their own exact result's score exactly
-(verified — see Methodology); the *specific* transaction IDs returned
-can differ because many transactions share identical text and tie
+(verified — see Methodology); the *specific* request IDs returned
+can differ because many requests share identical text and tie
 exactly on distance, and each engine breaks ties in its own
 deterministic order. Whichever engine is faster by a few tenths of a
 millisecond at this row count isn't a meaningful signal either way —
@@ -122,7 +125,7 @@ architectural, not tuning.** pgvector has no caching primitive at all —
 `pg_store.py`'s side of that scenario is just the plain exact search,
 called fresh every time, because there is nothing else to call. RedisVL's
 `SemanticCache` means a repeated or paraphrased question never touches
-`tx_flat_idx` again after the first time it's asked. For a corpus this
+`req_flat_idx` again after the first time it's asked. For a corpus this
 size the gap is already 18–20× on repeat traffic; the real story it's
 standing in for — caching an *expensive* operation (a large-corpus
 search, an LLM call) rather than a cheap 40,000-row one — would make
@@ -148,10 +151,10 @@ vector search:**
 
 | Engine | QPS | p50 | p95 | p99 | p99.9 | max |
 | ------ | --- | --- | --- | --- | ----- | --- |
-| Redis | 2,269 | 6.72 ms | 10.89 ms | 12.77 ms | 18.56 ms | 98.4 ms |
-| Postgres | 657 | 21.98 ms | 37.94 ms | 55.13 ms | 70.64 ms | 84.5 ms |
+| Redis | 2,315 | 6.62 ms | 10.52 ms | 12.51 ms | 17.24 ms | 73.67 ms |
+| Postgres | 678 | 21.6 ms | 34.88 ms | 53.42 ms | 67.33 ms | 81.59 ms |
 
-**3.45× throughput.** The query vector is embedded once, outside the
+**3.41× throughput.** The query vector is embedded once, outside the
 timed loop, and reused by every worker — see
 [Methodology](docs/METHODOLOGY.md) for why re-embedding per request
 would measure Python's GIL more than either datastore.
@@ -169,7 +172,7 @@ implementation (not imported from either store) for routing. Two engines
 agreeing proves nothing if both are wrong; both are checked against
 ground truth computed with no help from either engine.
 
-**Last clean run: 8 checks, 8 passed, 0 failed.**
+**Last clean run: 9 checks, 9 passed, 0 failed.**
 
 ## Configuration
 
@@ -179,8 +182,8 @@ ground truth computed with no help from either engine.
 | `PG_DSN` | `postgresql://demo:demopassword@localhost:5433/semanticdemo` | Postgres connection |
 | `PORT` | `8040` | Demo web server |
 
-`TRANSACTION_EMBED_SAMPLE` in `src/config.py` (default 40,000) controls
-how many transactions get embedded and searched — the full 300,000-row
+`REQUEST_EMBED_SAMPLE` in `src/config.py` (default 40,000) controls
+how many requests get embedded and searched — the full 300,000-row
 table exists in the generated corpus but isn't loaded into either
 engine.
 

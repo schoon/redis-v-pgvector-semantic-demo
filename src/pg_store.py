@@ -1,7 +1,7 @@
 """
 Every Postgres / pgvector operation this demo runs, in one place.
 
-One `embedding vector(384)` column on `transactions`, with a single HNSW
+One `embedding vector(384)` column on `requests`, with a single HNSW
 index on it (`CREATE INDEX ... USING hnsw`). That one index covers the
 "HNSW" scenario directly. For the "FLAT / exact" scenario there is no
 separate index to point at — pgvector's exact equivalent is simply not
@@ -68,45 +68,45 @@ def create_schema(conn):
     with conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
-        cur.execute("DROP TABLE IF EXISTS transactions CASCADE")
+        cur.execute("DROP TABLE IF EXISTS requests CASCADE")
         cur.execute("""
-            CREATE TABLE transactions (
-                transaction_id TEXT PRIMARY KEY,
-                merchant TEXT NOT NULL,
+            CREATE TABLE requests (
+                request_id TEXT PRIMARY KEY,
+                channel TEXT NOT NULL,
                 category TEXT NOT NULL,
                 description TEXT NOT NULL,
-                amount NUMERIC NOT NULL,
-                txn_date DATE NOT NULL,
+                days_open NUMERIC NOT NULL,
+                filed_date DATE NOT NULL,
                 embedding vector(384) NOT NULL
             )
         """)
-        cur.execute("CREATE INDEX transactions_category_ix ON transactions (category)")
+        cur.execute("CREATE INDEX requests_category_ix ON requests (category)")
 
-        cur.execute("DROP TABLE IF EXISTS card_products CASCADE")
+        cur.execute("DROP TABLE IF EXISTS procedures CASCADE")
         cur.execute("""
-            CREATE TABLE card_products (
-                product_id TEXT PRIMARY KEY,
+            CREATE TABLE procedures (
+                procedure_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 category TEXT NOT NULL,
-                annual_fee NUMERIC NOT NULL,
+                sla_days NUMERIC NOT NULL,
                 description TEXT NOT NULL,
                 embedding vector(384) NOT NULL
             )
         """)
-        cur.execute("CREATE INDEX card_products_category_ix ON card_products (category)")
-        cur.execute("CREATE INDEX card_products_fee_ix ON card_products (annual_fee)")
+        cur.execute("CREATE INDEX procedures_category_ix ON procedures (category)")
+        cur.execute("CREATE INDEX procedures_sla_ix ON procedures (sla_days)")
 
-        cur.execute("DROP TABLE IF EXISTS faq_articles CASCADE")
+        cur.execute("DROP TABLE IF EXISTS sop_articles CASCADE")
         cur.execute("""
-            CREATE TABLE faq_articles (
-                article_id TEXT PRIMARY KEY,
+            CREATE TABLE sop_articles (
+                sop_id TEXT PRIMARY KEY,
                 category TEXT NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
                 embedding vector(384) NOT NULL
             )
         """)
-        cur.execute("CREATE INDEX faq_articles_category_ix ON faq_articles (category)")
+        cur.execute("CREATE INDEX sop_articles_category_ix ON sop_articles (category)")
 
         cur.execute("DROP TABLE IF EXISTS route_references CASCADE")
         cur.execute("DROP TABLE IF EXISTS routes CASCADE")
@@ -136,46 +136,46 @@ def create_schema(conn):
 def create_hnsw_index(conn):
     with conn.cursor() as cur:
         cur.execute(f"""
-            CREATE INDEX transactions_embedding_hnsw_ix ON transactions
+            CREATE INDEX requests_embedding_hnsw_ix ON requests
             USING hnsw (embedding vector_cosine_ops)
             WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION})
         """)
 
 
-def load_transactions(conn, rows, batch_size=2000):
+def load_requests(conn, rows, batch_size=2000):
     with conn.cursor() as cur:
         batch = []
         for r in rows:
-            batch.append((r["transaction_id"], r["merchant"], r["category"], r["description"], r["amount"], r["date"], _vec(r["embedding"])))
+            batch.append((r["request_id"], r["channel"], r["category"], r["description"], r["days_open"], r["date"], _vec(r["embedding"])))
             if len(batch) >= batch_size:
                 cur.executemany(
-                    "INSERT INTO transactions (transaction_id, merchant, category, description, amount, txn_date, embedding) "
+                    "INSERT INTO requests (request_id, channel, category, description, days_open, filed_date, embedding) "
                     "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     batch,
                 )
                 batch = []
         if batch:
             cur.executemany(
-                "INSERT INTO transactions (transaction_id, merchant, category, description, amount, txn_date, embedding) "
+                "INSERT INTO requests (request_id, channel, category, description, days_open, filed_date, embedding) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 batch,
             )
 
 
-def load_products(conn, rows):
+def load_procedures(conn, rows):
     with conn.cursor() as cur:
         cur.executemany(
-            "INSERT INTO card_products (product_id, name, category, annual_fee, description, embedding) "
+            "INSERT INTO procedures (procedure_id, name, category, sla_days, description, embedding) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
-            [(r["product_id"], r["name"], r["category"], r["annual_fee"], r["description"], _vec(r["embedding"])) for r in rows],
+            [(r["procedure_id"], r["name"], r["category"], r["sla_days"], r["description"], _vec(r["embedding"])) for r in rows],
         )
 
 
-def load_faqs(conn, rows):
+def load_sops(conn, rows):
     with conn.cursor() as cur:
         cur.executemany(
-            "INSERT INTO faq_articles (article_id, category, title, body, embedding) VALUES (%s, %s, %s, %s, %s)",
-            [(r["article_id"], r["category"], r["title"], r["body"], _vec(r["embedding"])) for r in rows],
+            "INSERT INTO sop_articles (sop_id, category, title, body, embedding) VALUES (%s, %s, %s, %s, %s)",
+            [(r["sop_id"], r["category"], r["title"], r["body"], _vec(r["embedding"])) for r in rows],
         )
 
 
@@ -225,9 +225,9 @@ def _cursor(conn):
 def vector_search_flat(client, query_text=None, limit=10, vector=None):
     vec = vector if vector is not None else _vec(embed(query_text))
     sql = """
-        SELECT transaction_id, merchant, category, description, amount, txn_date,
+        SELECT request_id, channel, category, description, days_open, filed_date,
                1 - (embedding <=> %s) AS score
-        FROM transactions
+        FROM requests
         ORDER BY embedding <=> %s
         LIMIT %s
     """
@@ -249,9 +249,9 @@ def vector_search_flat(client, query_text=None, limit=10, vector=None):
 def vector_search_hnsw(client, query_text=None, limit=10, vector=None):
     vec = vector if vector is not None else _vec(embed(query_text))
     sql = """
-        SELECT transaction_id, merchant, category, description, amount, txn_date,
+        SELECT request_id, channel, category, description, days_open, filed_date,
                1 - (embedding <=> %s) AS score
-        FROM transactions
+        FROM requests
         ORDER BY embedding <=> %s
         LIMIT %s
     """
@@ -264,21 +264,21 @@ def vector_search_hnsw(client, query_text=None, limit=10, vector=None):
     return rows, ms, sql.strip()
 
 
-def semantic_search_products(client, query_text=None, category=None, max_annual_fee=None, limit=10, vector=None):
+def semantic_search_procedures(client, query_text=None, category=None, max_sla_days=None, limit=10, vector=None):
     vec = vector if vector is not None else _vec(embed(query_text))
     conds = []
     cond_params = []
     if category:
         conds.append("category = %s")
         cond_params.append(category)
-    if max_annual_fee is not None:
-        conds.append("annual_fee <= %s")
-        cond_params.append(max_annual_fee)
+    if max_sla_days is not None:
+        conds.append("sla_days <= %s")
+        cond_params.append(max_sla_days)
     where = f"WHERE {' AND '.join(conds)}" if conds else ""
     sql = f"""
-        SELECT product_id, name, category, annual_fee,
+        SELECT procedure_id, name, category, sla_days,
                description, 1 - (embedding <=> %s) AS score
-        FROM card_products
+        FROM procedures
         {where}
         ORDER BY embedding <=> %s
         LIMIT %s
@@ -292,13 +292,13 @@ def semantic_search_products(client, query_text=None, category=None, max_annual_
     return rows, ms, sql
 
 
-def semantic_search_faq(client, query_text=None, category=None, limit=10, vector=None):
+def semantic_search_sop(client, query_text=None, category=None, limit=10, vector=None):
     vec = vector if vector is not None else _vec(embed(query_text))
     where = "WHERE category = %s" if category else ""
     params = [vec] + ([category] if category else []) + [vec, limit]
     sql = f"""
-        SELECT article_id, category, title, body, 1 - (embedding <=> %s) AS score
-        FROM faq_articles
+        SELECT sop_id, category, title, body, 1 - (embedding <=> %s) AS score
+        FROM sop_articles
         {where}
         ORDER BY embedding <=> %s
         LIMIT %s
@@ -362,10 +362,10 @@ def route_query(client, query_text):
     # Same "route to the right vector search" step as redis_store.py,
     # reusing the same query embedding — no second embed() call.
     search_result, search_ms = None, None
-    if search_target == "products":
-        search_result, search_ms, _ = semantic_search_products(client, limit=3, vector=vec)
-    elif search_target == "faq":
-        search_result, search_ms, _ = semantic_search_faq(client, limit=3, vector=vec)
+    if search_target == "procedures":
+        search_result, search_ms, _ = semantic_search_procedures(client, limit=3, vector=vec)
+    elif search_target == "sop":
+        search_result, search_ms, _ = semantic_search_sop(client, limit=3, vector=vec)
 
     return {
         "route": name,
@@ -381,12 +381,12 @@ def route_query(client, query_text):
 def architecture_info(client):
     info = {}
     with client.cursor() as cur:
-        for table in ("transactions", "card_products", "faq_articles", "route_references"):
+        for table in ("requests", "procedures", "sop_articles", "route_references"):
             cur.execute(f"SELECT count(*) FROM {table}")
             info[table] = {"num_rows": cur.fetchone()[0]}
         cur.execute("""
             SELECT indexname, indexdef FROM pg_indexes
-            WHERE tablename IN ('transactions', 'card_products', 'faq_articles', 'route_references')
+            WHERE tablename IN ('requests', 'procedures', 'sop_articles', 'route_references')
             ORDER BY tablename, indexname
         """)
         info["indexes"] = [{"name": r[0], "def": r[1]} for r in cur.fetchall()]

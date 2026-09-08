@@ -30,7 +30,7 @@ import redis_store as rs
 from config import DATA_DIR
 from embeddings import embed
 
-QUERY_TEXT = "coffee shop purchases"
+QUERY_TEXT = "customer submitted a new mailing address"
 RESULTS_FILE = os.path.join(DATA_DIR, "bench-results.json")
 
 
@@ -126,7 +126,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=2)
     args = parser.parse_args()
 
-    print("Concurrent throughput — exact (FLAT) vector search over 40,000 transactions")
+    print("Concurrent throughput — exact (FLAT) vector search over 40,000 identity-ops requests")
     print(f"  concurrency: {args.concurrency} threads per engine")
     print(f"  duration:    {args.duration}s measured, {args.warmup}s warm-up")
     print("  engines run sequentially, never simultaneously\n")

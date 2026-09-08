@@ -136,12 +136,14 @@
     <p>
       Side-by-side vector search, hybrid semantic search, and semantic
       intent routing — <b>Redis (RedisVL)</b> vs <b>Postgres (pgvector)</b> —
-      over a fictitious credit-card company's transactions, card products,
-      and support FAQ. Same corpus, same embeddings, same questions.
+      over a fictitious bank's customer identity operations: the requests
+      that keep customer identity records accurate and compliant, the
+      procedures case workers follow, and a knowledge base of SOP
+      articles. Same corpus, same embeddings, same questions.
     </p>
     <div class="feature-grid">
-      <div class="card"><h3>Vector search</h3><p>Exact (FLAT/KNN) and approximate (HNSW) nearest-neighbor search over 40,000 embedded transactions.</p></div>
-      <div class="card"><h3>Semantic search</h3><p>Natural-language search over card products and FAQ articles, combined with category/fee filters in one query.</p></div>
+      <div class="card"><h3>Vector search</h3><p>Exact (FLAT/KNN) and approximate (HNSW) nearest-neighbor search over 40,000 embedded identity-ops requests.</p></div>
+      <div class="card"><h3>Semantic search</h3><p>Natural-language search over the procedure catalog and SOP articles, combined with category/SLA filters in one query.</p></div>
       <div class="card">
         <h3>Semantic caching</h3>
         <p>RedisVL's SemanticCache vs Postgres, which has no caching layer and recomputes every single call.</p>
@@ -154,7 +156,7 @@
       </div>
     </div>
     <div class="cta"><button id="enterDemo">Enter demo →</button></div>
-    <p style="font-size:0.75rem; margin-top:2rem;">No real customer or transaction data of any kind. See <a href="https://github.com/schoon/redis-v-pgvector-semantic-demo/blob/main/docs/METHODOLOGY.md">Methodology</a>.</p>
+    <p style="font-size:0.75rem; margin-top:2rem;">No real customer or case data of any kind. See <a href="https://github.com/schoon/redis-v-pgvector-semantic-demo/blob/main/docs/METHODOLOGY.md">Methodology</a>.</p>
   </div>
 
   <div class="overlay" id="cacheDiagramOverlay" hidden>
@@ -163,19 +165,19 @@
       <h2>Semantic caching, with RedisVL</h2>
       <p class="sub">One extension call checks the cache; one call populates it. No hand-rolled similarity math.</p>
       <div class="flow">
-        <div class="flow-step"><b>1. Customer question</b>"which card is best for travel with no annual fee"</div>
+        <div class="flow-step"><b>1. Customer question</b>"what's the process for a duplicate TIN case"</div>
         <div class="flow-arrow">↓ embed locally (sentence-transformers, no API call)</div>
         <div class="flow-step"><b>2. cache.check(vector=vec)</b>RedisVL SemanticCache — one indexed range query against previously-answered questions</div>
         <div class="flow-arrow">↓</div>
         <div class="flow-branch">
-          <div class="flow-step hit"><b>HIT — distance ≤ threshold</b>Return the cached response. tx_flat_idx is never touched.</div>
+          <div class="flow-step hit"><b>HIT — distance ≤ threshold</b>Return the cached response. req_flat_idx is never touched.</div>
           <div class="flow-step miss"><b>MISS</b>Run the real search, then cache.store(...) for next time</div>
         </div>
       </div>
       <pre class="diagram-code">from redisvl.extensions.llmcache import SemanticCache
 
 cache = SemanticCache(
-    name="tx_search_cache",
+    name="req_search_cache",
     distance_threshold=0.15,
     vectorizer=my_vectorizer,
     redis_client=client,
@@ -199,21 +201,21 @@ def answer(query_text):
       <h2>Semantic routing, with RedisVL</h2>
       <p class="sub">One extension call classifies the intent. The application reuses that same vector to act on it.</p>
       <div class="flow">
-        <div class="flow-step"><b>1. Customer question</b>"I think someone stole my card"</div>
+        <div class="flow-step"><b>1. Customer question</b>"I think two of my accounts share the same SSN"</div>
         <div class="flow-arrow">↓ embed locally (same model as everything else in this demo)</div>
         <div class="flow-step"><b>2. router(vector=vec)</b>RedisVL SemanticRouter — compares against every route's reference utterances, averages distance per route, picks the closest one under its own threshold</div>
         <div class="flow-arrow">↓</div>
-        <div class="flow-step"><b>3. Matched route: report_fraud</b>(or "no confident match" if nothing clears its threshold)</div>
+        <div class="flow-step"><b>3. Matched route: duplicate_tin_resolution</b>(or "no confident match" if nothing clears its threshold)</div>
         <div class="flow-arrow">↓ reuse the SAME vector — no second embed() call</div>
-        <div class="flow-step"><b>4. Act on the route</b>Search the matching corpus (card products / FAQ), or hand off to a live account-data lookup for intents like "check balance" that no static corpus can answer</div>
+        <div class="flow-step"><b>4. Act on the route</b>Search the matching corpus (procedure catalog / SOP articles), or hand off to a live case-system lookup for intents like "case status" that no static corpus can answer</div>
       </div>
       <pre class="diagram-code">from redisvl.extensions.router import SemanticRouter, Route
 
 router = SemanticRouter(
     name="intent_router",
     routes=[
-        Route(name="report_fraud", references=[...], distance_threshold=0.5),
-        Route(name="card_recommendation", references=[...]),
+        Route(name="duplicate_tin_resolution", references=[...], distance_threshold=0.5),
+        Route(name="procedure_lookup", references=[...]),
         # ... 10 more intents, same shape
     ],
     vectorizer=my_vectorizer,
@@ -223,10 +225,10 @@ router = SemanticRouter(
 def route_and_answer(query_text):
     vec = embed(query_text)
     match = router(vector=vec)              # one call classifies the intent
-    if match.name == "card_recommendation":
-        return search_products(vector=vec)  # reuse the SAME vector
-    elif match.name == "dispute_transaction":
-        return search_faq(vector=vec)
+    if match.name == "procedure_lookup":
+        return search_procedures(vector=vec)  # reuse the SAME vector
+    elif match.name == "address_update":
+        return search_sop(vector=vec)
     # ...</pre>
       <p class="callout">Postgres's equivalent (see the demo) is a hand-written SQL CTE that replicates this same two-stage filter by hand — it works, but every route-matching rule lives in application SQL instead of a three-line extension call.</p>
     </div>
@@ -258,12 +260,12 @@ def route_and_answer(query_text):
     <div class="filters" id="semanticFilters">
       <label class="inline">corpus
         <select id="semCorpus">
-          <option value="products">Card products</option>
-          <option value="faq">FAQ articles</option>
+          <option value="procedures">Procedure catalog</option>
+          <option value="sop">SOP articles</option>
         </select>
       </label>
       <label class="inline">category <select id="semCategory"><option value="">any</option></select></label>
-      <label class="inline">max annual fee <input type="number" id="semMaxFee" style="width:6rem" placeholder="any"></label>
+      <label class="inline">max SLA days <input type="number" id="semMaxFee" style="width:6rem" placeholder="any"></label>
     </div>
 
     <div class="filters" id="cacheFilters">
@@ -335,8 +337,8 @@ def route_and_answer(query_text):
   });
 
   const SCENARIOS = {
-    flat: { hint: 'Exact (FLAT/KNN) nearest-neighbor search over 40,000 embedded transaction descriptions — every candidate compared, no approximation.' },
-    hnsw: { hint: 'Approximate (HNSW) nearest-neighbor search — same transactions, same query, a graph index instead of brute force.' },
+    flat: { hint: 'Exact (FLAT/KNN) nearest-neighbor search over 40,000 embedded identity-ops request descriptions — every candidate compared, no approximation.' },
+    hnsw: { hint: 'Approximate (HNSW) nearest-neighbor search — same requests, same query, a graph index instead of brute force.' },
     semantic: { hint: 'Semantic search with metadata filters, in one query — not vector search followed by a separate filter step.', filters: true },
     cache: { hint: 'Repeat/popular traffic for the same question — RedisVL\'s SemanticCache vs Postgres, which has no caching layer and recomputes every single call.', cacheFilters: true, noRuns: true },
     route: { hint: 'Route a customer question to the right intent, then straight into the right vector search — RedisVL\'s built-in SemanticRouter vs a hand-rolled pgvector equivalent.', noRuns: true },
@@ -345,10 +347,10 @@ def route_and_answer(query_text):
   };
 
   const EXAMPLES = {
-    flat: ['coffee shop purchases', 'hotel stays', 'airline ticket charges', 'monthly streaming subscription', 'gas station fill-up'],
-    hnsw: ['coffee shop purchases', 'hotel stays', 'airline ticket charges', 'monthly streaming subscription', 'gas station fill-up'],
-    semantic: ['card with no annual fee and travel rewards', 'best card for grocery spending', 'how do I dispute a charge', 'foreign transaction fee'],
-    cache: ['coffee shop purchases', 'hotel stays', 'airline ticket charges', 'monthly streaming subscription', 'gas station fill-up'],
+    flat: ['address change requests', 'duplicate TIN cases', 'beneficial ownership updates', 'due diligence refresh', 'deceased customer processing'],
+    hnsw: ['address change requests', 'duplicate TIN cases', 'beneficial ownership updates', 'due diligence refresh', 'deceased customer processing'],
+    semantic: ['process for a business address change', 'how to handle a deceased customer\'s account', 'how do I resolve a duplicate TIN', 'beneficial ownership recertification'],
+    cache: ['address change requests', 'duplicate TIN cases', 'beneficial ownership updates', 'due diligence refresh', 'deceased customer processing'],
   };
 
   function setScenario(next) {
@@ -367,7 +369,7 @@ def route_and_answer(query_text):
     } else if (next === 'semantic') {
       el('q').placeholder = 'Describe what you\'re looking for...';
     } else {
-      el('q').placeholder = 'Describe a kind of transaction...';
+      el('q').placeholder = 'Describe a kind of request...';
     }
     search();
   }
@@ -390,19 +392,20 @@ def route_and_answer(query_text):
   el('semMaxFee').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
   el('cacheRepeats').addEventListener('change', search);
 
-  // Card products and FAQ articles use two completely different category
-  // taxonomies (see generate.py's CARD_PRODUCT_CATALOG vs FAQ_CATALOG) —
-  // categories are fixed, so hand-rolled here rather than adding an
-  // endpoint just to enumerate them, but they MUST be repopulated when
-  // the corpus dropdown changes. Leaving product categories showing while
-  // "FAQ articles" is selected lets you pick a category that matches zero
-  // FAQ articles, which silently returns an empty result on both engines
-  // — not a search bug, but from the UI it looks exactly like one.
-  const PRODUCT_CATEGORIES = ['Cash Back', 'Travel', 'Student', 'Business', 'Low Rate', 'Building Credit', 'Premium'];
-  const FAQ_CATEGORIES = ['Disputes', 'Fraud', 'Statements', 'Fees', 'Credit Limit', 'Rewards', 'Payments', 'Account Management', 'Security'];
+  // The procedure catalog and SOP articles use two different (though
+  // overlapping) category taxonomies (see generate.py's PROCEDURE_CATALOG
+  // vs SOP_CATALOG) — categories are fixed, so hand-rolled here rather
+  // than adding an endpoint just to enumerate them, but they MUST be
+  // repopulated when the corpus dropdown changes. Leaving procedure
+  // categories showing while "SOP articles" is selected lets you pick a
+  // category that matches zero SOP articles, which silently returns an
+  // empty result on both engines — not a search bug, but from the UI it
+  // looks exactly like one.
+  const PROCEDURE_CATEGORIES = ['Address Maintenance', 'TIN/SSN Resolution', 'Beneficial Ownership', 'Due Diligence', 'Identity Verification', 'Estate Processing', 'Documentation', 'Escalations'];
+  const SOP_CATEGORIES = ['Address Changes', 'TIN/SSN Issues', 'Beneficial Ownership', 'Due Diligence', 'Identity Verification', 'Estate Processing', 'Documentation', 'Escalations', 'Case Management'];
 
   function populateCategoryOptions() {
-    const cats = el('semCorpus').value === 'faq' ? FAQ_CATEGORIES : PRODUCT_CATEGORIES;
+    const cats = el('semCorpus').value === 'sop' ? SOP_CATEGORIES : PROCEDURE_CATEGORIES;
     const select = el('semCategory');
     select.replaceChildren(new Option('any', ''), ...cats.map((c) => new Option(c, c)));
   }
@@ -457,11 +460,11 @@ def route_and_answer(query_text):
     return table;
   }
 
-  const TX_COLS = [['Merchant', 'merchant'], ['Category', 'category'], ['Description', 'description'],
-    ['Amount', 'amount', 'num', (v) => `$${Number(v).toFixed(2)}`], ['Score', 'score', 'num', (v) => v.toFixed(3)]];
-  const PRODUCT_COLS = [['Name', 'name'], ['Category', 'category'], ['Annual fee', 'annual_fee', 'num', (v) => `$${v}`],
+  const REQ_COLS = [['Channel', 'channel'], ['Category', 'category'], ['Description', 'description'],
+    ['Days open', 'days_open', 'num', (v) => `${v}`], ['Score', 'score', 'num', (v) => v.toFixed(3)]];
+  const PROCEDURE_COLS = [['Name', 'name'], ['Category', 'category'], ['SLA (days)', 'sla_days', 'num', (v) => `${v}`],
     ['Score', 'score', 'num', (v) => v.toFixed(3)]];
-  const FAQ_COLS = [['Category', 'category'], ['Title', 'title'], ['Score', 'score', 'num', (v) => v.toFixed(3)]];
+  const SOP_COLS = [['Category', 'category'], ['Title', 'title'], ['Score', 'score', 'num', (v) => v.toFixed(3)]];
 
   async function search() {
     const seq = ++inflight;
@@ -483,7 +486,7 @@ def route_and_answer(query_text):
   }
 
   async function runVectorSearch(stale, algorithm) {
-    const query = el('q').value.trim() || 'coffee shop purchases';
+    const query = el('q').value.trim() || 'address change requests';
     const runs = el('runs').value;
     const params = new URLSearchParams({ query, algorithm, runs, limit: 8 });
     const d = await (await fetch(`/api/vector-search?${params}`)).json();
@@ -496,23 +499,23 @@ def route_and_answer(query_text):
     setVerdict(d.redis.ms, d.postgres.ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
     el('rcount').textContent = ''; el('ocount').textContent = '';
     el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
-    el('rbody').replaceChildren(rowsToTable(d.redis.rows, TX_COLS));
-    el('obody').replaceChildren(rowsToTable(d.postgres.rows, TX_COLS));
+    el('rbody').replaceChildren(rowsToTable(d.redis.rows, REQ_COLS));
+    el('obody').replaceChildren(rowsToTable(d.postgres.rows, REQ_COLS));
     renderBars(d.redis.ms, d.postgres.ms);
     el('method').innerHTML = algorithm === 'hnsw'
-      ? 'Approximate nearest-neighbor search via an HNSW graph index on both engines. "recall@8 vs exact" compares this result\'s IDs against that <b>same engine\'s</b> exact (FLAT) result for the identical query — low overlap with an otherwise-correct category usually means many transactions tied at the same distance, not a wrong answer (see Methodology).'
+      ? 'Approximate nearest-neighbor search via an HNSW graph index on both engines. "recall@8 vs exact" compares this result\'s IDs against that <b>same engine\'s</b> exact (FLAT) result for the identical query — low overlap with an otherwise-correct category usually means many requests tied at the same distance, not a wrong answer (see Methodology).'
       : 'Exact nearest-neighbor search: RedisVL\'s FLAT algorithm vs a sequential scan in Postgres (HNSW index scans disabled for this one query) — every candidate compared, no approximation, on both sides.';
   }
 
   async function runSemantic(stale) {
-    const query = el('q').value.trim() || 'card with no annual fee and travel rewards';
+    const query = el('q').value.trim() || 'process for a duplicate TIN case';
     const corpus = el('semCorpus').value;
     const category = el('semCategory').value;
-    const maxFee = el('semMaxFee').value.trim();
+    const maxSla = el('semMaxFee').value.trim();
     const runs = el('runs').value;
     const params = new URLSearchParams({ query, corpus, runs, limit: 8 });
     if (category) params.set('category', category);
-    if (maxFee) params.set('max_annual_fee', maxFee);
+    if (maxSla) params.set('max_sla_days', maxSla);
     const d = await (await fetch(`/api/semantic-search?${params}`)).json();
     if (stale()) return;
     el('q').value = query;
@@ -522,11 +525,11 @@ def route_and_answer(query_text):
     setVerdict(d.redis.ms, d.postgres.ms, { matchOk: d.countsMatch, mismatchLabel: 'counts differ' });
     el('rcount').textContent = ''; el('ocount').textContent = '';
     el('rq').textContent = d.redis.query; el('oq').textContent = d.postgres.query;
-    const cols = corpus === 'faq' ? FAQ_COLS : PRODUCT_COLS;
+    const cols = corpus === 'sop' ? SOP_COLS : PROCEDURE_COLS;
     el('rbody').replaceChildren(rowsToTable(d.redis.rows, cols));
     el('obody').replaceChildren(rowsToTable(d.postgres.rows, cols));
     renderBars(d.redis.ms, d.postgres.ms);
-    el('method').innerHTML = `Vector search combined with ${category ? `a <code>category</code> filter` : 'no filter'}${maxFee ? ` and a <code>max annual fee</code> filter` : ''} in a single query on both engines — not a post-filter step.`;
+    el('method').innerHTML = `Vector search combined with ${category ? `a <code>category</code> filter` : 'no filter'}${maxSla ? ` and a <code>max SLA days</code> filter` : ''} in a single query on both engines — not a post-filter step.`;
   }
 
   function callLogTable(calls, engine) {
@@ -542,7 +545,7 @@ def route_and_answer(query_text):
   }
 
   async function runSemanticCache(stale) {
-    const query = el('q').value.trim() || 'coffee shop purchases';
+    const query = el('q').value.trim() || 'address change requests';
     const repeats = el('cacheRepeats').value || 5;
     const params = new URLSearchParams({ query, repeats, limit: 8 });
     const d = await (await fetch(`/api/semantic-cache?${params}`)).json();
@@ -564,7 +567,7 @@ def route_and_answer(query_text):
     el('rbody').replaceChildren(callLogTable(d.calls, 'redis'));
     el('obody').replaceChildren(callLogTable(d.calls, 'postgres'));
     renderBars(noRepeats ? d.redis.first_ms : d.redis.repeat_avg_ms, noRepeats ? d.postgres.first_ms : d.postgres.repeat_avg_ms);
-    el('method').innerHTML = `Simulating ${d.repeats} people asking the same (or a near-duplicate) question. Redis checks its SemanticCache first — call 1 misses and populates it, every call after that hits and never touches <code>tx_flat_idx</code>. Postgres has no caching layer, so it re-runs the full exact search every single call — there is no "first vs. repeat" distinction on that side, by design. The cache is cleared before this simulation starts so call 1 is a genuine miss.`;
+    el('method').innerHTML = `Simulating ${d.repeats} people asking the same (or a near-duplicate) question. Redis checks its SemanticCache first — call 1 misses and populates it, every call after that hits and never touches <code>req_flat_idx</code>. Postgres has no caching layer, so it re-runs the full exact search every single call — there is no "first vs. repeat" distinction on that side, by design. The cache is cleared before this simulation starts so call 1 is a genuine miss.`;
   }
 
   function routeCard(match, engineName) {
@@ -586,7 +589,7 @@ def route_and_answer(query_text):
     if (match.search_target && match.search_result && match.search_result.length) {
       const label = document.createElement('div'); label.className = 'action';
       label.style.marginTop = '0.6rem';
-      const corpusName = match.search_target === 'products' ? 'card products' : 'FAQ articles';
+      const corpusName = match.search_target === 'procedures' ? 'procedure catalog' : 'SOP articles';
       label.textContent = `→ routed to ${corpusName} search (${match.search_ms.toFixed(3)} ms) — top match:`;
       card.append(label);
       const top = match.search_result[0];
@@ -597,14 +600,14 @@ def route_and_answer(query_text):
     } else if (match.route && !match.search_target) {
       const label = document.createElement('div'); label.className = 'action';
       label.style.marginTop = '0.6rem';
-      label.textContent = '→ needs live account data — no static corpus in this demo answers this';
+      label.textContent = '→ needs a live case-system lookup — no static corpus in this demo answers this';
       card.append(label);
     }
     return card;
   }
 
   async function runRoute(stale) {
-    const query = el('q').value.trim() || 'I think someone stole my card';
+    const query = el('q').value.trim() || 'I think two of my accounts share the same SSN';
     const params = new URLSearchParams({ query, runs: 3 });
     const d = await (await fetch(`/api/semantic-route?${params}`)).json();
     if (stale()) return;
@@ -652,8 +655,8 @@ def route_and_answer(query_text):
   async function runArchitecture(stale) {
     const d = await (await fetch('/api/architecture')).json();
     if (stale()) return;
-    el('rt').textContent = `${d.redis.db_size.toLocaleString()}`; el('ot').textContent = `${d.postgres.transactions.num_rows.toLocaleString()}`;
-    el('rsub').textContent = 'keys'; el('osub').textContent = 'rows in transactions';
+    el('rt').textContent = `${d.redis.db_size.toLocaleString()}`; el('ot').textContent = `${d.postgres.requests.num_rows.toLocaleString()}`;
+    el('rsub').textContent = 'keys'; el('osub').textContent = 'rows in requests';
     el('verdict').classList.remove('warn'); el('vx').textContent = '—'; el('vlbl').textContent = '';
     el('rcount').textContent = ''; el('ocount').textContent = '';
     const rIndexes = Object.entries(d.redis).filter(([k]) => k !== 'db_size').map(([k, v]) => `${k}: ${v ? `${v.num_docs} docs, ${v.algorithm || 'n/a'}` : 'n/a'}`).join('\n');

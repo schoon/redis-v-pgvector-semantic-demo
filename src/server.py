@@ -48,7 +48,7 @@ def clamp_runs(v):
 
 
 @app.get("/api/vector-search")
-def vector_search(query: str = "coffee purchase", algorithm: str = "flat", limit: int = 10, runs: str = "3"):
+def vector_search(query: str = "address change request", algorithm: str = "flat", limit: int = 10, runs: str = "3"):
     n = clamp_runs(runs)
     if algorithm == "hnsw":
         r_rows, r_ms, r_q = median_timed(lambda: rs.vector_search_hnsw(redis_client, query, limit), n)
@@ -73,29 +73,29 @@ def vector_search(query: str = "coffee purchase", algorithm: str = "flat", limit
 
 
 def _recall(approx_rows, exact_rows):
-    exact_ids = {r["transaction_id"] for r in exact_rows}
+    exact_ids = {r["request_id"] for r in exact_rows}
     if not exact_ids:
         return None
-    hit = sum(1 for r in approx_rows if r["transaction_id"] in exact_ids)
+    hit = sum(1 for r in approx_rows if r["request_id"] in exact_ids)
     return round(hit / len(exact_ids), 3)
 
 
 @app.get("/api/semantic-search")
-def semantic_search(query: str = "no annual fee travel card", corpus: str = "products",
-                     category: str = "", max_annual_fee: str = "", limit: int = 10, runs: str = "3"):
+def semantic_search(query: str = "process for a duplicate TIN case", corpus: str = "procedures",
+                     category: str = "", max_sla_days: str = "", limit: int = 10, runs: str = "3"):
     n = clamp_runs(runs)
-    max_fee = float(max_annual_fee) if max_annual_fee else None
+    max_sla = float(max_sla_days) if max_sla_days else None
     cat = category or None
 
-    if corpus == "faq":
-        r_rows, r_ms, r_q = median_timed(lambda: rs.semantic_search_faq(redis_client, query, cat, limit), n)
-        p_rows, p_ms, p_q = median_timed(lambda: pgs.semantic_search_faq(pg_conn, query, cat, limit), n)
+    if corpus == "sop":
+        r_rows, r_ms, r_q = median_timed(lambda: rs.semantic_search_sop(redis_client, query, cat, limit), n)
+        p_rows, p_ms, p_q = median_timed(lambda: pgs.semantic_search_sop(pg_conn, query, cat, limit), n)
     else:
-        r_rows, r_ms, r_q = median_timed(lambda: rs.semantic_search_products(redis_client, query, cat, max_fee, limit), n)
-        p_rows, p_ms, p_q = median_timed(lambda: pgs.semantic_search_products(pg_conn, query, cat, max_fee, limit), n)
+        r_rows, r_ms, r_q = median_timed(lambda: rs.semantic_search_procedures(redis_client, query, cat, max_sla, limit), n)
+        p_rows, p_ms, p_q = median_timed(lambda: pgs.semantic_search_procedures(pg_conn, query, cat, max_sla, limit), n)
 
     return {
-        "query": query, "corpus": corpus, "category": cat, "max_annual_fee": max_fee, "runs": n,
+        "query": query, "corpus": corpus, "category": cat, "max_sla_days": max_sla, "runs": n,
         "redis": {"ms": r_ms, "rows": r_rows, "query": r_q},
         "postgres": {"ms": p_ms, "rows": p_rows, "query": p_q},
         "countsMatch": len(r_rows) == len(p_rows),
@@ -103,7 +103,7 @@ def semantic_search(query: str = "no annual fee travel card", corpus: str = "pro
 
 
 @app.get("/api/semantic-route")
-def semantic_route(query: str = "I think someone stole my card", runs: str = "3"):
+def semantic_route(query: str = "I think two of my accounts share the same SSN", runs: str = "3"):
     n = clamp_runs(runs)
 
     def r_once():
@@ -126,12 +126,12 @@ def semantic_route(query: str = "I think someone stole my card", runs: str = "3"
 
 
 @app.get("/api/semantic-cache")
-def semantic_cache_demo(query: str = "coffee shop purchases", limit: int = 8, repeats: str = "5"):
+def semantic_cache_demo(query: str = "customer moved to a new address", limit: int = 8, repeats: str = "5"):
     """
     Simulates repeat/popular traffic for the same question: `repeats`
     sequential calls, same query text each time. Redis checks its
     SemanticCache first (call 0 misses and populates it; every call
-    after that hits, skipping tx_flat_idx entirely). Postgres has no
+    after that hits, skipping req_flat_idx entirely). Postgres has no
     cache, so every single call re-runs the full FLAT scan — there is no
     "first call" vs "repeat call" distinction on that side, on purpose.
 
@@ -144,7 +144,7 @@ def semantic_cache_demo(query: str = "coffee shop purchases", limit: int = 8, re
 
     calls = []
     for i in range(n):
-        r_rows, r_ms, r_hit, r_desc = rs.cached_transaction_search(semantic_cache, redis_client, query, limit=limit)
+        r_rows, r_ms, r_hit, r_desc = rs.cached_request_search(semantic_cache, redis_client, query, limit=limit)
         p_rows, p_ms, p_query = pgs.vector_search_flat(pg_conn, query, limit=limit)
         calls.append({"i": i, "redis_ms": r_ms, "redis_hit": r_hit, "redis_desc": r_desc, "postgres_ms": p_ms})
 

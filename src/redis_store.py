@@ -1,17 +1,18 @@
 """
 Every Redis / RedisVL operation this demo runs, in one place.
 
-Two indexes cover the same transaction Hashes (`tx:<id>`), each reading
+Two indexes cover the same request Hashes (`req:<id>`), each reading
 the same `embedding` field but built with a different vector algorithm —
-`tx_flat_idx` (FLAT: exact brute-force KNN, scans every candidate) and
-`tx_hnsw_idx` (HNSW: approximate nearest-neighbor graph search). Same
+`req_flat_idx` (FLAT: exact brute-force KNN, scans every candidate) and
+`req_hnsw_idx` (HNSW: approximate nearest-neighbor graph search). Same
 data, same field, two independently-built index structures — that's
 enough for RediSearch to answer identical queries two different ways, no
 duplicated storage required.
 
-`product_idx` and `faq_idx` are small (15 and 26 documents) hybrid
-indexes — a vector field plus TAG/NUMERIC fields — used for the
-"ask about your card products" semantic-search scenario with filters.
+`procedure_idx` and `sop_idx` are small (15 and 26 documents) hybrid
+indexes — a vector field plus TAG/NUMERIC fields — used for the "look up
+the right procedure" and "search the SOP knowledge base" semantic-search
+scenarios with filters.
 
 The semantic router uses RedisVL's own `SemanticRouter` extension
 untouched, wrapped around the exact same `embeddings.embed`/`embed_many`
@@ -19,7 +20,7 @@ functions the rest of this file uses (via `CustomTextVectorizer`), so
 "how RedisVL routes a sentence" is not a separately-tuned code path from
 "how RedisVL searches a sentence."
 
-`build_semantic_cache()`/`cached_transaction_search()` use RedisVL's
+`build_semantic_cache()`/`cached_request_search()` use RedisVL's
 `SemanticCache` extension the same way — same shared vectorizer, no
 separate embedding path. There is no Postgres/pgvector equivalent to
 compare it against feature-for-feature: pgvector has no caching
@@ -46,12 +47,12 @@ from config import REDIS_URL, VECTOR_DIM
 from embeddings import embed, embed_many
 from routes import ROUTES
 
-TX_FLAT_INDEX = "tx_flat_idx"
-TX_HNSW_INDEX = "tx_hnsw_idx"
-PRODUCT_INDEX = "product_idx"
-CACHE_NAME = "tx_search_cache"
+REQ_FLAT_INDEX = "req_flat_idx"
+REQ_HNSW_INDEX = "req_hnsw_idx"
+PROCEDURE_INDEX = "procedure_idx"
+CACHE_NAME = "req_search_cache"
 CACHE_DISTANCE_THRESHOLD = 0.15
-FAQ_INDEX = "faq_idx"
+SOP_INDEX = "sop_idx"
 ROUTER_NAME = "intent_router"
 
 
@@ -61,10 +62,10 @@ def connect():
 
 # RedisVL's own HNSW defaults are M=16, ef_construction=200 (both fine),
 # but ef_runtime=10 — measured directly against this corpus, that's too
-# low for good recall: a plain-language query like "coffee purchase" (not
+# low for good recall: a plain-language query like "address change" (not
 # a copy of any stored description) missed its entire target cluster
-# and returned "Online Shopping" transactions instead, 0% overlap with
-# the exact result. Raising ef_runtime to 40 (matching pgvector's
+# and returned unrelated requests instead, 0% overlap with the exact
+# result. Raising ef_runtime to 40 (matching pgvector's
 # hnsw.ef_search=40 below, for a genuinely comparable configuration on
 # both engines, not a thumb on the scale) fixed it. Don't drop this back
 # to the library default on the theory that it's unnecessary tuning —
@@ -86,51 +87,51 @@ def _vector_field(algorithm):
     return {"name": "embedding", "type": "vector", "attrs": attrs}
 
 
-# FT.CREATE tx_flat_idx ON HASH PREFIX tx: SCHEMA id TAG merchant TAG
-# category TAG amount NUMERIC embedding VECTOR FLAT ...
+# FT.CREATE req_flat_idx ON HASH PREFIX req: SCHEMA id TAG channel TAG
+# category TAG days_open NUMERIC embedding VECTOR FLAT ...
 # Exact KNN: every candidate vector is compared, no approximation. Correct
 # by construction, cost grows linearly with corpus size.
-def _tx_schema(index_name, algorithm):
+def _req_schema(index_name, algorithm):
     return IndexSchema.from_dict({
-        "index": {"name": index_name, "prefix": "tx:", "storage_type": "hash"},
+        "index": {"name": index_name, "prefix": "req:", "storage_type": "hash"},
         "fields": [
             # NOT named "id" — RedisVL query results always include an "id"
-            # key of their own (the full Redis key, e.g. "tx::T00000114"),
+            # key of their own (the full Redis key, e.g. "req::R00000114"),
             # which would collide with and shadow a same-named schema field.
-            {"name": "transaction_id", "type": "tag"},
-            {"name": "merchant", "type": "tag"},
+            {"name": "request_id", "type": "tag"},
+            {"name": "channel", "type": "tag"},
             {"name": "category", "type": "tag"},
             {"name": "description", "type": "text"},
-            {"name": "amount", "type": "numeric"},
+            {"name": "days_open", "type": "numeric"},
             {"name": "date", "type": "tag"},
             _vector_field(algorithm),
         ],
     })
 
 
-# FT.CREATE product_idx ON HASH PREFIX product: SCHEMA ... embedding
+# FT.CREATE procedure_idx ON HASH PREFIX procedure: SCHEMA ... embedding
 # VECTOR FLAT ... — small corpus (15 rows), FLAT vs HNSW makes no
 # measurable difference at this scale, so this scenario is about hybrid
 # filtering, not algorithm choice.
-def _product_schema():
+def _procedure_schema():
     return IndexSchema.from_dict({
-        "index": {"name": PRODUCT_INDEX, "prefix": "product:", "storage_type": "hash"},
+        "index": {"name": PROCEDURE_INDEX, "prefix": "procedure:", "storage_type": "hash"},
         "fields": [
-            {"name": "product_id", "type": "tag"},
+            {"name": "procedure_id", "type": "tag"},
             {"name": "name", "type": "text"},
             {"name": "category", "type": "tag"},
-            {"name": "annual_fee", "type": "numeric"},
+            {"name": "sla_days", "type": "numeric"},
             {"name": "description", "type": "text"},
             _vector_field("flat"),
         ],
     })
 
 
-def _faq_schema():
+def _sop_schema():
     return IndexSchema.from_dict({
-        "index": {"name": FAQ_INDEX, "prefix": "faq:", "storage_type": "hash"},
+        "index": {"name": SOP_INDEX, "prefix": "sop:", "storage_type": "hash"},
         "fields": [
-            {"name": "article_id", "type": "tag"},
+            {"name": "sop_id", "type": "tag"},
             {"name": "category", "type": "tag"},
             {"name": "title", "type": "text"},
             {"name": "body", "type": "text"},
@@ -141,36 +142,36 @@ def _faq_schema():
 
 def get_index(client, index_name):
     schema = {
-        TX_FLAT_INDEX: _tx_schema(TX_FLAT_INDEX, "flat"),
-        TX_HNSW_INDEX: _tx_schema(TX_HNSW_INDEX, "hnsw"),
-        PRODUCT_INDEX: _product_schema(),
-        FAQ_INDEX: _faq_schema(),
+        REQ_FLAT_INDEX: _req_schema(REQ_FLAT_INDEX, "flat"),
+        REQ_HNSW_INDEX: _req_schema(REQ_HNSW_INDEX, "hnsw"),
+        PROCEDURE_INDEX: _procedure_schema(),
+        SOP_INDEX: _sop_schema(),
     }[index_name]
     return SearchIndex(schema=schema, redis_client=client)
 
 
 def create_indexes(client):
-    # tx_hnsw_idx is deliberately NOT created here — see create_hnsw_index()
+    # req_hnsw_idx is deliberately NOT created here — see create_hnsw_index()
     # below for why.
-    for name in (TX_FLAT_INDEX, PRODUCT_INDEX, FAQ_INDEX):
+    for name in (REQ_FLAT_INDEX, PROCEDURE_INDEX, SOP_INDEX):
         get_index(client, name).create(overwrite=True, drop=True)
 
 
-# Create tx_hnsw_idx only after load_transactions() has already written
-# every tx: hash. Creating it up front, like the other three indexes, and
+# Create req_hnsw_idx only after load_requests() has already written
+# every req: hash. Creating it up front, like the other three indexes, and
 # letting RediSearch build the HNSW graph incrementally as each document
 # is HSET one at a time (the on-write indexing path) measured
 # significantly worse recall than building it here, in one shot, against
 # already-loaded data (the same background bulk-scan path RediSearch uses
 # when you attach an index to an existing keyspace) — a plain-language
-# query with no exact match in the corpus ("coffee purchase") missed its
+# query with no exact match in the corpus ("address change") missed its
 # entire target cluster with the former and found it cleanly with the
 # latter, same data, same M/ef_construction/ef_runtime either way. This
 # mirrors pgvector's own documented advice to build the HNSW index after
 # the bulk load, not before — don't move this back to create_indexes().
 def create_hnsw_index(client):
-    get_index(client, TX_HNSW_INDEX).create(overwrite=True, drop=True)
-    wait_for_indexing(client, TX_HNSW_INDEX)
+    get_index(client, REQ_HNSW_INDEX).create(overwrite=True, drop=True)
+    wait_for_indexing(client, REQ_HNSW_INDEX)
 
 
 # The background scan create_hnsw_index() triggers is async — FT.INFO's
@@ -192,45 +193,45 @@ def vector_to_bytes(vec):
     return np.array(vec, dtype="float32").tobytes()
 
 
-def load_transactions(client, rows):
+def load_requests(client, rows):
     """rows: iterable of dicts with an added 'embedding' key (list[float])."""
-    idx = get_index(client, TX_FLAT_INDEX)  # any of the two works, they share the prefix
+    idx = get_index(client, REQ_FLAT_INDEX)  # any of the two works, they share the prefix
     data = [
         {
-            "transaction_id": r["transaction_id"],
-            "merchant": r["merchant"],
+            "request_id": r["request_id"],
+            "channel": r["channel"],
             "category": r["category"],
             "description": r["description"],
-            "amount": r["amount"],
+            "days_open": r["days_open"],
             "date": r["date"],
             "embedding": vector_to_bytes(r["embedding"]),
         }
         for r in rows
     ]
-    idx.load(data, id_field="transaction_id")
+    idx.load(data, id_field="request_id")
 
 
-def load_products(client, rows):
-    idx = get_index(client, PRODUCT_INDEX)
+def load_procedures(client, rows):
+    idx = get_index(client, PROCEDURE_INDEX)
     data = [
         {
-            "product_id": r["product_id"],
+            "procedure_id": r["procedure_id"],
             "name": r["name"],
             "category": r["category"],
-            "annual_fee": r["annual_fee"],
+            "sla_days": r["sla_days"],
             "description": r["description"],
             "embedding": vector_to_bytes(r["embedding"]),
         }
         for r in rows
     ]
-    idx.load(data, id_field="product_id")
+    idx.load(data, id_field="procedure_id")
 
 
-def load_faqs(client, rows):
-    idx = get_index(client, FAQ_INDEX)
+def load_sops(client, rows):
+    idx = get_index(client, SOP_INDEX)
     data = [
         {
-            "article_id": r["article_id"],
+            "sop_id": r["sop_id"],
             "category": r["category"],
             "title": r["title"],
             "body": r["body"],
@@ -238,7 +239,7 @@ def load_faqs(client, rows):
         }
         for r in rows
     ]
-    idx.load(data, id_field="article_id")
+    idx.load(data, id_field="sop_id")
 
 
 def _run_vector_query(client, index_name, query_vector, limit, filter_expression=None, return_fields=None):
@@ -259,13 +260,13 @@ def _run_vector_query(client, index_name, query_vector, limit, filter_expression
         for r in results
     ]
     # "id" excluded above is RedisVL's own result key (the full Redis key,
-    # e.g. "tx::T00000114") — distinct from our own transaction_id/
-    # product_id/article_id schema fields, which are requested explicitly
+    # e.g. "req::R00000114") — distinct from our own request_id/
+    # procedure_id/sop_id schema fields, which are requested explicitly
     # via return_fields and pass straight through untouched.
     return rows, ms, str(q)
 
 
-# FT.SEARCH tx_flat_idx "*=>[KNN <limit> @embedding $vector]" — exact KNN.
+# FT.SEARCH req_flat_idx "*=>[KNN <limit> @embedding $vector]" — exact KNN.
 # `vector`, when given, skips the embed() call and searches with it
 # directly — bench.py uses this so concurrent-throughput numbers measure
 # the datastore, not the (single-threaded, GIL-bound) local embedding
@@ -273,49 +274,49 @@ def _run_vector_query(client, index_name, query_vector, limit, filter_expression
 def vector_search_flat(client, query_text=None, limit=10, vector=None):
     vec = vector if vector is not None else embed(query_text)
     return _run_vector_query(
-        client, TX_FLAT_INDEX, vec, limit,
-        return_fields=["transaction_id", "merchant", "category", "description", "amount", "date"],
+        client, REQ_FLAT_INDEX, vec, limit,
+        return_fields=["request_id", "channel", "category", "description", "days_open", "date"],
     )
 
 
-# FT.SEARCH tx_hnsw_idx "*=>[KNN <limit> @embedding $vector]" — approximate
+# FT.SEARCH req_hnsw_idx "*=>[KNN <limit> @embedding $vector]" — approximate
 # KNN over an HNSW graph. Same query, same corpus, different index.
 def vector_search_hnsw(client, query_text=None, limit=10, vector=None):
     vec = vector if vector is not None else embed(query_text)
     return _run_vector_query(
-        client, TX_HNSW_INDEX, vec, limit,
-        return_fields=["transaction_id", "merchant", "category", "description", "amount", "date"],
+        client, REQ_HNSW_INDEX, vec, limit,
+        return_fields=["request_id", "channel", "category", "description", "days_open", "date"],
     )
 
 
-def _build_filter(category=None, max_annual_fee=None):
+def _build_filter(category=None, max_sla_days=None):
     expr = None
     if category:
         expr = Tag("category") == category
-    if max_annual_fee is not None:
-        fee_expr = Num("annual_fee") <= max_annual_fee
-        expr = fee_expr if expr is None else (expr & fee_expr)
+    if max_sla_days is not None:
+        sla_expr = Num("sla_days") <= max_sla_days
+        expr = sla_expr if expr is None else (expr & sla_expr)
     return expr
 
 
-# FT.SEARCH product_idx "(@category:{Travel} @annual_fee:[-inf 100])=>[KNN
-# ... ]" — vector search combined with TAG/NUMERIC filters in one query,
-# not a post-filter step.
-def semantic_search_products(client, query_text=None, category=None, max_annual_fee=None, limit=10, vector=None):
+# FT.SEARCH procedure_idx "(@category:{Address Maintenance} @sla_days:[-inf
+# 5])=>[KNN ... ]" — vector search combined with TAG/NUMERIC filters in one
+# query, not a post-filter step.
+def semantic_search_procedures(client, query_text=None, category=None, max_sla_days=None, limit=10, vector=None):
     vec = vector if vector is not None else embed(query_text)
-    filt = _build_filter(category, max_annual_fee)
+    filt = _build_filter(category, max_sla_days)
     return _run_vector_query(
-        client, PRODUCT_INDEX, vec, limit, filter_expression=filt,
-        return_fields=["product_id", "name", "category", "annual_fee", "description"],
+        client, PROCEDURE_INDEX, vec, limit, filter_expression=filt,
+        return_fields=["procedure_id", "name", "category", "sla_days", "description"],
     )
 
 
-def semantic_search_faq(client, query_text=None, category=None, limit=10, vector=None):
+def semantic_search_sop(client, query_text=None, category=None, limit=10, vector=None):
     vec = vector if vector is not None else embed(query_text)
     filt = Tag("category") == category if category else None
     return _run_vector_query(
-        client, FAQ_INDEX, vec, limit, filter_expression=filt,
-        return_fields=["article_id", "category", "title", "body"],
+        client, SOP_INDEX, vec, limit, filter_expression=filt,
+        return_fields=["sop_id", "category", "title", "body"],
     )
 
 
@@ -362,11 +363,11 @@ def route_query(router, client, query_text):
     # conflated into one number.
     search_result = None
     search_ms = None
-    if search_target == "products":
-        rows, search_ms, _ = semantic_search_products(client, limit=3, vector=vec)
+    if search_target == "procedures":
+        rows, search_ms, _ = semantic_search_procedures(client, limit=3, vector=vec)
         search_result = rows
-    elif search_target == "faq":
-        rows, search_ms, _ = semantic_search_faq(client, limit=3, vector=vec)
+    elif search_target == "sop":
+        rows, search_ms, _ = semantic_search_sop(client, limit=3, vector=vec)
         search_result = rows
 
     return {
@@ -396,12 +397,12 @@ def build_semantic_cache(client, overwrite=False):
     )
 
 
-# Caches transaction search results, not product search — the point of
+# Caches request search results, not procedure search — the point of
 # this scenario is "repeating an expensive question shouldn't repeat the
-# expensive work," and the exact/FLAT transaction search is the
-# expensive operation in this demo (Postgres ~15-18ms; see the vector
-# search scenario). Caching the 15-row product search would barely be
-# visible against either engine's already-sub-millisecond cost there.
+# expensive work," and the exact/FLAT request search is the expensive
+# operation in this demo (Postgres ~15-18ms; see the vector search
+# scenario). Caching the 15-row procedure search would barely be visible
+# against either engine's already-sub-millisecond cost there.
 #
 # Embedding happens BEFORE the timer starts, same convention as every
 # other scenario in this file — a cache hit and a cache miss both still
@@ -409,7 +410,7 @@ def build_semantic_cache(client, overwrite=False):
 # excluding it here isolates the same thing it isolates everywhere else:
 # the datastore-side cost, not a client-side cost identical on both
 # engines regardless of caching.
-def cached_transaction_search(cache, client, query_text=None, limit=8, vector=None):
+def cached_request_search(cache, client, query_text=None, limit=8, vector=None):
     vec = vector if vector is not None else embed(query_text)
     t0 = time.perf_counter()
     hits = cache.check(vector=vec)
@@ -417,7 +418,7 @@ def cached_transaction_search(cache, client, query_text=None, limit=8, vector=No
         rows = json.loads(hits[0]["response"])
         ms = (time.perf_counter() - t0) * 1000
         distance = float(hits[0].get("vector_distance", 0))
-        return rows, ms, True, f"CACHE HIT (distance {distance:.4f} <= {CACHE_DISTANCE_THRESHOLD}) — tx_flat_idx not queried"
+        return rows, ms, True, f"CACHE HIT (distance {distance:.4f} <= {CACHE_DISTANCE_THRESHOLD}) — req_flat_idx not queried"
     rows, _, query_str = vector_search_flat(client, limit=limit, vector=vec)
     cache.store(prompt=query_text or "(precomputed vector)", response=json.dumps(rows), vector=vec)
     ms = (time.perf_counter() - t0) * 1000
@@ -426,7 +427,7 @@ def cached_transaction_search(cache, client, query_text=None, limit=8, vector=No
 
 def architecture_info(client):
     info = {}
-    for name in (TX_FLAT_INDEX, TX_HNSW_INDEX, PRODUCT_INDEX, FAQ_INDEX, ROUTER_NAME, CACHE_NAME):
+    for name in (REQ_FLAT_INDEX, REQ_HNSW_INDEX, PROCEDURE_INDEX, SOP_INDEX, ROUTER_NAME, CACHE_NAME):
         try:
             raw = client.ft(name).info()
             info[name] = {
@@ -452,7 +453,7 @@ def _algorithm_of(ft_info):
     # name theirs "vector"/"prompt_vector" respectively (see
     # redisvl.extensions.constants). Matching on "embedding" specifically
     # left the Architecture tab reporting "n/a" for intent_router and
-    # tx_search_cache even though both really are FLAT-indexed.
+    # req_search_cache even though both really are FLAT-indexed.
     attrs = ft_info.get(b"attributes") or ft_info.get("attributes", [])
     for attr in attrs:
         flat = [_decode(x) for x in attr] if isinstance(attr, list) else []

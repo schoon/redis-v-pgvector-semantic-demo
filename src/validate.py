@@ -17,7 +17,7 @@ import numpy as np
 
 import pg_store as pgs
 import redis_store as rs
-from config import DATA_FILES, TRANSACTION_EMBED_SAMPLE
+from config import DATA_FILES, REQUEST_EMBED_SAMPLE
 from embeddings import embed, embed_many
 from routes import ROUTES
 
@@ -59,7 +59,7 @@ def ground_truth_distances(query_vec, corpus_vecs, corpus_ids):
     return dict(zip(corpus_ids, distances))
 
 
-# Many transactions share literally identical description text (and so
+# Many requests share literally identical description text (and so
 # identical embeddings) — "top 8 by exact ID" is ambiguous whenever more
 # than 8 rows tie at the k-th smallest distance, and a naive set-equality
 # check flags that ambiguity as a mismatch even though every ID returned
@@ -103,59 +103,59 @@ def main():
     pg_conn = pgs.connect()
 
     print("Checking corpus counts...")
-    all_tx = read_jsonl(DATA_FILES["transactions"])
-    sample_tx = all_tx[:TRANSACTION_EMBED_SAMPLE]
-    products = read_jsonl(DATA_FILES["card_products"])
-    faqs = read_jsonl(DATA_FILES["faq_articles"])
+    all_requests = read_jsonl(DATA_FILES["requests"])
+    sample_requests = all_requests[:REQUEST_EMBED_SAMPLE]
+    procedures = read_jsonl(DATA_FILES["procedures"])
+    sops = read_jsonl(DATA_FILES["sop_articles"])
 
     redis_info = rs.architecture_info(redis_client)
     pg_info = pgs.architecture_info(pg_conn)
-    record("Redis tx_flat_idx doc count == embedded sample", redis_info["tx_flat_idx"]["num_docs"] == len(sample_tx),
-           f"{redis_info['tx_flat_idx']['num_docs']:,} vs {len(sample_tx):,}")
-    record("Postgres transactions row count == embedded sample", pg_info["transactions"]["num_rows"] == len(sample_tx),
-           f"{pg_info['transactions']['num_rows']:,} vs {len(sample_tx):,}")
-    record("Redis product_idx doc count == corpus file", redis_info["product_idx"]["num_docs"] == len(products),
-           f"{redis_info['product_idx']['num_docs']} vs {len(products)}")
-    record("Redis faq_idx doc count == corpus file", redis_info["faq_idx"]["num_docs"] == len(faqs),
-           f"{redis_info['faq_idx']['num_docs']} vs {len(faqs)}")
+    record("Redis req_flat_idx doc count == embedded sample", redis_info["req_flat_idx"]["num_docs"] == len(sample_requests),
+           f"{redis_info['req_flat_idx']['num_docs']:,} vs {len(sample_requests):,}")
+    record("Postgres requests row count == embedded sample", pg_info["requests"]["num_rows"] == len(sample_requests),
+           f"{pg_info['requests']['num_rows']:,} vs {len(sample_requests):,}")
+    record("Redis procedure_idx doc count == corpus file", redis_info["procedure_idx"]["num_docs"] == len(procedures),
+           f"{redis_info['procedure_idx']['num_docs']} vs {len(procedures)}")
+    record("Redis sop_idx doc count == corpus file", redis_info["sop_idx"]["num_docs"] == len(sops),
+           f"{redis_info['sop_idx']['num_docs']} vs {len(sops)}")
 
     # ---- FLAT vector search vs brute-force ground truth -------------------
-    print("\nRe-embedding the transaction sample independently for brute-force ground truth (this takes a few seconds)...")
-    tx_vecs = embed_many([t["description"] for t in sample_tx])
-    tx_ids = [t["transaction_id"] for t in sample_tx]
+    print("\nRe-embedding the request sample independently for brute-force ground truth (this takes a few seconds)...")
+    req_vecs = embed_many([r["description"] for r in sample_requests])
+    req_ids = [r["request_id"] for r in sample_requests]
 
-    queries = ["coffee shop purchases", "hotel stays", "monthly streaming subscription", "gas station fill-up", "grocery shopping trip"]
+    queries = ["address change requests", "duplicate TIN cases", "beneficial ownership updates", "due diligence refresh", "deceased customer processing"]
     flat_checked, flat_mismatch = 0, 0
     for q in queries:
         qvec = embed(q)
-        truth_dists = ground_truth_distances(qvec, tx_vecs, tx_ids)
+        truth_dists = ground_truth_distances(qvec, req_vecs, req_ids)
         r_rows, _, _ = rs.vector_search_flat(redis_client, q, limit=8)
         p_rows, _, _ = pgs.vector_search_flat(pg_conn, q, limit=8)
-        r_ids = [row["transaction_id"] for row in r_rows]
-        p_ids = [row["transaction_id"] for row in p_rows]
+        r_ids = [row["request_id"] for row in r_rows]
+        p_ids = [row["request_id"] for row in p_rows]
         flat_checked += 1
         if not is_valid_top_k(r_ids, truth_dists, 8) or not is_valid_top_k(p_ids, truth_dists, 8):
             flat_mismatch += 1
     record("FLAT search == brute-force ground truth (both engines, tie-aware)", flat_mismatch == 0,
            f"{flat_checked} queries checked, {flat_mismatch} mismatches")
 
-    # ---- Product/FAQ semantic search vs brute-force -----------------------
-    prod_vecs = embed_many([p["description"] for p in products])
-    prod_ids = [p["product_id"] for p in products]
-    prod_queries = ["good for international travel with no extra fees", "best for someone rebuilding credit", "flat cash back on everything"]
-    prod_checked, prod_mismatch = 0, 0
-    for q in prod_queries:
+    # ---- Procedure semantic search vs brute-force --------------------------
+    proc_vecs = embed_many([p["description"] for p in procedures])
+    proc_ids = [p["procedure_id"] for p in procedures]
+    proc_queries = ["process for a business address change", "how to handle a deceased customer's account", "steps for a duplicate TIN merge"]
+    proc_checked, proc_mismatch = 0, 0
+    for q in proc_queries:
         qvec = embed(q)
-        truth = brute_force_top_k(qvec, prod_vecs, prod_ids, 3)
-        r_rows, _, _ = rs.semantic_search_products(redis_client, q, limit=3)
-        p_rows, _, _ = pgs.semantic_search_products(pg_conn, q, limit=3)
-        r_ids = [row["product_id"] for row in r_rows]
-        p_ids = [row["product_id"] for row in p_rows]
-        prod_checked += 1
+        truth = brute_force_top_k(qvec, proc_vecs, proc_ids, 3)
+        r_rows, _, _ = rs.semantic_search_procedures(redis_client, q, limit=3)
+        p_rows, _, _ = pgs.semantic_search_procedures(pg_conn, q, limit=3)
+        r_ids = [row["procedure_id"] for row in r_rows]
+        p_ids = [row["procedure_id"] for row in p_rows]
+        proc_checked += 1
         if set(r_ids) != set(truth) or set(p_ids) != set(truth):
-            prod_mismatch += 1
-    record("Product semantic search == brute-force ground truth", prod_mismatch == 0,
-           f"{prod_checked} queries checked, {prod_mismatch} mismatches")
+            proc_mismatch += 1
+    record("Procedure semantic search == brute-force ground truth", proc_mismatch == 0,
+           f"{proc_checked} queries checked, {proc_mismatch} mismatches")
 
     # ---- Semantic routing vs an independently-written router --------------
     print("\nRe-embedding route references independently for ground-truth routing...")
@@ -166,13 +166,13 @@ def main():
     for r in ROUTES[:6]:
         test_utterances.append(r["references"][0])  # a route's own reference: must self-classify
     test_utterances += [
-        "I want my money back for a charge I didn't make",
+        "I want someone to look into a case that's been open forever",
         "asdkjqwoe random gibberish text with no clear intent",
     ]
 
     route_checked, route_mismatch, agree_checked, agree_mismatch = 0, 0, 0, 0
     search_checked, search_mismatch = 0, 0
-    route_key = lambda row: row.get("product_id") or row.get("article_id")
+    route_key = lambda row: row.get("procedure_id") or row.get("sop_id")
     for utt in test_utterances:
         qvec = embed(utt)
         truth_name, _ = independent_route(qvec, route_refs_by_name)
@@ -186,7 +186,7 @@ def main():
             agree_mismatch += 1
 
         target = r_match.get("search_target")
-        if target in ("products", "faq"):
+        if target in ("procedures", "sop"):
             search_checked += 1
             r_top = route_key(r_match["search_result"][0]) if r_match["search_result"] else None
             p_top = route_key(p_match["search_result"][0]) if p_match["search_result"] else None
