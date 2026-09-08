@@ -30,9 +30,30 @@
   .landing .feature-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 2.2rem 0; text-align: left; }
   .landing .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem 1rem; }
   .landing .card h3 { font-size: 0.85rem; margin: 0 0 0.4rem; }
-  .landing .card p { font-size: 0.8rem; margin: 0; }
+  .landing .card p { font-size: 0.8rem; margin: 0 0 0.6rem; }
+  .landing .card button.diagram-link { background: none; border: none; color: #7db8ff; font-size: 0.75rem; padding: 0; cursor: pointer; font-family: inherit; text-decoration: underline; }
+  .landing .card button.diagram-link:hover { color: #a5cdff; }
   html.demo .landing { display: none; }
   html:not(.demo) .demo-app { display: none; }
+
+  /* Architecture diagram overlays */
+  .overlay { position: fixed; inset: 0; background: rgba(6, 7, 10, 0.82); display: flex; align-items: center; justify-content: center; padding: 2rem 1rem; z-index: 50; }
+  .overlay[hidden] { display: none; }
+  .overlay-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; max-width: 640px; width: 100%; max-height: 88vh; overflow-y: auto; padding: 1.6rem 1.8rem; }
+  .overlay-panel h2 { margin: 0 0 0.3rem; font-size: 1.2rem; }
+  .overlay-panel .sub { color: var(--muted); font-size: 0.82rem; margin: 0 0 1.3rem; }
+  .overlay-panel .close { float: right; background: none; border: none; color: var(--muted); font-size: 1.3rem; cursor: pointer; line-height: 1; padding: 0.2rem; }
+  .overlay-panel .close:hover { color: var(--text); }
+  .flow { display: flex; flex-direction: column; align-items: center; gap: 0; margin: 0 0 1.4rem; }
+  .flow-step { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.82rem; text-align: center; width: 100%; max-width: 420px; }
+  .flow-step b { display: block; font-size: 0.72rem; color: var(--redis); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.15rem; }
+  .flow-arrow { color: var(--muted); font-size: 0.9rem; padding: 0.25rem 0; }
+  .flow-branch { display: flex; gap: 0.8rem; width: 100%; max-width: 480px; }
+  .flow-branch .flow-step { max-width: none; flex: 1; }
+  .flow-branch .flow-step.hit { border-color: var(--good); }
+  .flow-branch .flow-step.miss { border-color: #d8a02a; }
+  .diagram-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; line-height: 1.5; color: #cfd5e0; background: #0f1116; border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1rem; overflow-x: auto; white-space: pre; margin: 0; }
+  .overlay-panel .callout { margin-top: 1rem; font-size: 0.78rem; color: var(--muted); }
 
   .scenarios { display: flex; gap: 0.4rem; margin: 1.1rem 0 0.75rem; flex-wrap: wrap; }
   .scenarios button { background: var(--panel); color: var(--muted); border: 1px solid var(--line); padding: 0.45rem 0.85rem; border-radius: 999px; cursor: pointer; font-size: 0.85rem; font-family: inherit; }
@@ -121,11 +142,94 @@
     <div class="feature-grid">
       <div class="card"><h3>Vector search</h3><p>Exact (FLAT/KNN) and approximate (HNSW) nearest-neighbor search over 40,000 embedded transactions.</p></div>
       <div class="card"><h3>Semantic search</h3><p>Natural-language search over card products and FAQ articles, combined with category/fee filters in one query.</p></div>
-      <div class="card"><h3>Semantic caching</h3><p>RedisVL's SemanticCache vs Postgres, which has no caching layer and recomputes every single call.</p></div>
-      <div class="card"><h3>Semantic routing</h3><p>RedisVL's built-in SemanticRouter vs a hand-rolled pgvector equivalent — routes straight into the matching search.</p></div>
+      <div class="card">
+        <h3>Semantic caching</h3>
+        <p>RedisVL's SemanticCache vs Postgres, which has no caching layer and recomputes every single call.</p>
+        <button class="diagram-link" id="showCacheDiagram">See how it works with RedisVL →</button>
+      </div>
+      <div class="card">
+        <h3>Semantic routing</h3>
+        <p>RedisVL's built-in SemanticRouter vs a hand-rolled pgvector equivalent — routes straight into the matching search.</p>
+        <button class="diagram-link" id="showRouteDiagram">See how it works with RedisVL →</button>
+      </div>
     </div>
     <div class="cta"><button id="enterDemo">Enter demo →</button></div>
     <p style="font-size:0.75rem; margin-top:2rem;">No real customer or transaction data of any kind. See <a href="https://github.com/schoon/redis-v-pgvector-semantic-demo/blob/main/docs/METHODOLOGY.md">Methodology</a>.</p>
+  </div>
+
+  <div class="overlay" id="cacheDiagramOverlay" hidden>
+    <div class="overlay-panel">
+      <button class="close" id="closeCacheDiagram" aria-label="Close">×</button>
+      <h2>Semantic caching, with RedisVL</h2>
+      <p class="sub">One extension call checks the cache; one call populates it. No hand-rolled similarity math.</p>
+      <div class="flow">
+        <div class="flow-step"><b>1. Customer question</b>"which card is best for travel with no annual fee"</div>
+        <div class="flow-arrow">↓ embed locally (sentence-transformers, no API call)</div>
+        <div class="flow-step"><b>2. cache.check(vector=vec)</b>RedisVL SemanticCache — one indexed range query against previously-answered questions</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-branch">
+          <div class="flow-step hit"><b>HIT — distance ≤ threshold</b>Return the cached response. tx_flat_idx is never touched.</div>
+          <div class="flow-step miss"><b>MISS</b>Run the real search, then cache.store(...) for next time</div>
+        </div>
+      </div>
+      <pre class="diagram-code">from redisvl.extensions.llmcache import SemanticCache
+
+cache = SemanticCache(
+    name="tx_search_cache",
+    distance_threshold=0.15,
+    vectorizer=my_vectorizer,
+    redis_client=client,
+)
+
+def answer(query_text):
+    vec = embed(query_text)
+    hits = cache.check(vector=vec)
+    if hits:
+        return hits[0]["response"]        # cache hit — done, no search
+    response = run_real_search(vec)       # cache miss — compute it once
+    cache.store(prompt=query_text, response=response, vector=vec)
+    return response</pre>
+      <p class="callout">That's the whole implementation — no reference cosine-distance math, no manual index management. Postgres has no equivalent primitive to call here, which is the point: this is a capability, not just a faster query.</p>
+    </div>
+  </div>
+
+  <div class="overlay" id="routeDiagramOverlay" hidden>
+    <div class="overlay-panel">
+      <button class="close" id="closeRouteDiagram" aria-label="Close">×</button>
+      <h2>Semantic routing, with RedisVL</h2>
+      <p class="sub">One extension call classifies the intent. The application reuses that same vector to act on it.</p>
+      <div class="flow">
+        <div class="flow-step"><b>1. Customer question</b>"I think someone stole my card"</div>
+        <div class="flow-arrow">↓ embed locally (same model as everything else in this demo)</div>
+        <div class="flow-step"><b>2. router(vector=vec)</b>RedisVL SemanticRouter — compares against every route's reference utterances, averages distance per route, picks the closest one under its own threshold</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step"><b>3. Matched route: report_fraud</b>(or "no confident match" if nothing clears its threshold)</div>
+        <div class="flow-arrow">↓ reuse the SAME vector — no second embed() call</div>
+        <div class="flow-step"><b>4. Act on the route</b>Search the matching corpus (card products / FAQ), or hand off to a live account-data lookup for intents like "check balance" that no static corpus can answer</div>
+      </div>
+      <pre class="diagram-code">from redisvl.extensions.router import SemanticRouter, Route
+
+router = SemanticRouter(
+    name="intent_router",
+    routes=[
+        Route(name="report_fraud", references=[...], distance_threshold=0.5),
+        Route(name="card_recommendation", references=[...]),
+        # ... 10 more intents, same shape
+    ],
+    vectorizer=my_vectorizer,
+    redis_client=client,
+)
+
+def route_and_answer(query_text):
+    vec = embed(query_text)
+    match = router(vector=vec)              # one call classifies the intent
+    if match.name == "card_recommendation":
+        return search_products(vector=vec)  # reuse the SAME vector
+    elif match.name == "dispute_transaction":
+        return search_faq(vector=vec)
+    # ...</pre>
+      <p class="callout">Postgres's equivalent (see the demo) is a hand-written SQL CTE that replicates this same two-stage filter by hand — it works, but every route-matching rule lives in application SQL instead of a three-line extension call.</p>
+    </div>
   </div>
 
   <div class="demo-app">
@@ -216,6 +320,19 @@
   }
   el('enterDemo').addEventListener('click', () => showDemo(true));
   el('backToOverview').addEventListener('click', () => showDemo(false));
+
+  function bindDiagram(showBtnId, overlayId, closeBtnId) {
+    const overlay = el(overlayId);
+    el(showBtnId).addEventListener('click', () => { overlay.hidden = false; });
+    el(closeBtnId).addEventListener('click', () => { overlay.hidden = true; });
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.hidden = true; });
+  }
+  bindDiagram('showCacheDiagram', 'cacheDiagramOverlay', 'closeCacheDiagram');
+  bindDiagram('showRouteDiagram', 'routeDiagramOverlay', 'closeRouteDiagram');
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    for (const id of ['cacheDiagramOverlay', 'routeDiagramOverlay']) el(id).hidden = true;
+  });
 
   const SCENARIOS = {
     flat: { hint: 'Exact (FLAT/KNN) nearest-neighbor search over 40,000 embedded transaction descriptions — every candidate compared, no approximation.' },
